@@ -8,11 +8,11 @@ trackdir=tracks
 bamdir=bam
 logdir=logs
 qcdir=qc
-genome=hg38
 fasta=genome.fa
 index=genome.fa
 extend=200
-platform="PLATFORM=ILLUMINA"
+pl="PLATFORM=ILLUMINA"
+validate=yes
 
 # help message
 help_message="
@@ -31,14 +31,15 @@ optional arguments:
     -b|--bamdir : output directory for bam files (default = bam)
     -q|--qcdir : output directory for qc metrics (default = qc)
     -l|--logdir : output directory for log files (default = logs)
-    -g|--genome : genome version (default = hg38)
-    -n|--name : name prefix for output file (default = FASTQ filename)
+    -n|--name : name prefix for output files (default = FASTQ filename)
     -e|--extend : bp extension for generating coverage track (default = 200)
+    -v|--validate : whether to validate existance of input files [yes,no] (default = yes) 
 example:
     bash $(basename "$0") -g hg38 -f REH_H3K27ac_ChIPseq.fastq.gz
 additional info:
     # Additional read group information can be provided to include in BAM header
     # Possible read group data to include:
+        --sm : sample name (default = name)
         --id : read group ID (usually flow cell + lane)
         --lb : library name (name unique to each library)
         --pu : platform unit (usually flow cell + barcode + lane)
@@ -49,11 +50,12 @@ additional info:
         --pi : predicted median insert size (e.g. 200)
         --pm : platform model - further discription of platform
     # if platform is ILLUMINA - will automatically extract PU and ID from read name 
+    # validate argument is useful for scheduling future jobs when files dont currently exist
 
 "
 
 # parse command line arg
-while [[ $# -gt 0 ]]; do
+while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
         -f|--fastq)
@@ -88,12 +90,16 @@ while [[ $# -gt 0 ]]; do
         qcdir=$2
         shift
         ;;
-        -g|--genome)
-        genome=$2
-        shift
-        ;;
         -n|--name)
         name=$2
+        shift
+        ;;
+        -v|--validate)
+        validate=$2
+        shift
+        ;;
+        --sm)
+        sm="SAMPLE_NAME=$2"
         shift
         ;;
         --id)
@@ -137,45 +143,57 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# check indir exists
-if [[ ! -d "$workdir/$fqdir" ]]; then
-    printf "\nERROR: input directory does not exist: %s/%s/%s\n" $workdir $fqdir
-    echo "$help_message"; exit 1
-fi
-
-# check FASTQ argument is provided and file exists
+# check required argument
 if [[ -z "$fastq" ]]; then
     printf "\nERROR: FASTQ argument required\n"
     echo "$help_message"; exit 1
-elif [[ ! -f "$workdir/$fqdir/$fastq" ]]; then
-    printf "\nERROR: input FASTQ file does not exist: %s/%s/%s\n" $workdir $fqdir $fastq
-    echo "$help_message"; exit 1
 fi
 
-# check if mate exists and, if PE, set PE arguments
-if [[ ! -z "$mate" ]]; then
-    if [[ ! -f "$workdir/$fqdir/$mate" ]]; then
+if [[ "$validate" = yes ]]; then
+    # check indir exists
+    if [[ ! -d "$workdir/$fqdir" ]]; then
+        printf "\nERROR: input directory does not exist: %s/%s/%s\n" $workdir $fqdir
+        echo "$help_message"; exit 1
+    fi
+
+    # check FASTQ exists
+    if [[ ! -f "$workdir/$fqdir/$fastq" ]]; then
+        printf "\nERROR: input FASTQ file does not exist: %s/%s/%s\n" $workdir $fqdir $fastq
+        echo "$help_message"; exit 1
+    fi
+
+    # check mate (if set)
+    if [[ ! -z "$mate" ]] && [[ ! -f "$workdir/$fqdir/$mate" ]]; then
         printf "\nERROR: input mate FASTQ does not exist: %s/%s/%s\n" $workdir $fqdir $fastq
         echo "$help_message"; exit 1
     fi
+
+    # check resource files exist
+    if [[ ! -e "$workdir/$resdir/$fasta" ]]; then
+        printf "\nERROR: FASTA file does not exist: %s/%s/%s\n" $workdir $resdir $fasta
+        echo "$help_message"; exit 1
+    fi
+    if [[ ! -e "$workdir/$resdir/$index" ]]; then
+        printf "\nERROR: Index file does not exist: %s/%s/%s\n" $workdir $resdir $index
+        echo "$help_message"; exit 1
+    fi
+fi
+
+# if mate - set PE args
+if [[ ! -z "$mate" ]]; then
     pe_cp_arg="cp $workdir/$fqdir/$mate ."
     pe_fq2sam_arg="FASTQ2=$mate"
     pe_bwamem_arg="-p "
 fi
 
-# if no name provided extract from FASTQ filename
+# extract filename prefix if not provided
 if [[ -z "$name" ]]; then
     name=${fastq%%.*}
 fi
 
-# check resource files exist
-if [[ ! -e "$workdir/$resdir/$fasta" ]]; then
-    printf "\nERROR: FASTA file does not exist: %s/%s/%s\n" $workdir $resdir $fasta
-    echo "$help_message"; exit 1
-fi
-if [[ ! -e "$workdir/$resdir/$index" ]]; then
-    printf "\nERROR: Index file does not exist: %s/%s/%s\n" $workdir $resdir $index
-    echo "$help_message"; exit 1
+# set sample name to filename if not provided
+if [[ -z "$sm" ]]; then
+    sm="SAMPLE_NAME=$name"
 fi
 
 # strip fasta extension (to copy dict)
@@ -199,7 +217,7 @@ mkdir -p $workdir/$bamdir
 mkdir -p $workdir/$trackdir
 
 # run job
-JOBID=$(cat <<- EOS | qsub -N $name.bwa - 
+jobid=$(cat <<- EOS | qsub -N $name.bwa - 
 	#!/bin/bash
 	#PBS -l walltime=60:00:00
 	#PBS -l select=1:mem=40gb:ncpus=20
@@ -229,8 +247,7 @@ JOBID=$(cat <<- EOS | qsub -N $name.bwa -
 	java -jar -Xmx32G -jar /apps/picard/2.6.0/picard.jar FastqToSam \
 		FASTQ=$fastq \
 		OUTPUT=$name.unaligned.bam \
-		SAMPLE_NAME=$name \
-		$pe_fq2sam_arg $id $lb $pl $pu $pm $cn $dt $pi
+		$pe_fq2sam_arg $id $lb $pl $pu $pm $cn $dt $pi $sm
 
 	# mark adapters
 	java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MarkIlluminaAdapters \
@@ -272,7 +289,7 @@ JOBID=$(cat <<- EOS | qsub -N $name.bwa -
 	# mark dup
 	java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MarkDuplicates \
 		I=$name.merge.bam \
-		O=$name.$genome.bam \
+		O=$name.bam \
 		M=$name.mark_duplicate_metrics \
 		CREATE_INDEX=true
 	cp $name.mark_duplicate_metrics $workdir/$qcdir/metrics/
@@ -280,13 +297,13 @@ JOBID=$(cat <<- EOS | qsub -N $name.bwa -
 	# alignment metrics
 	java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics \
 		R=$fasta \
-		I=$name.$genome.bam \
+		I=$name.bam \
 		O=$name.alignment_summary_metrics
 	cp $name.alignment_summary_metrics $workdir/$qcdir/metrics/
 
 	# copy final bam to outdir
-	samtools index $name.$genome.bam
-	cp $name.$genome.bam* $workdir/$bamdir/
+	samtools index $name.bam
+	cp $name.bam* $workdir/$bamdir/
 
 	ls -lhAR
 	EOS

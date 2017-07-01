@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -o errexit
 set -o pipefail
 set -o nounset
@@ -11,7 +10,7 @@ resdir=resources
 logdir=logs
 scriptdir=scripts
 delim=","
-genome=hg38
+genome_size=hs
 fq1_idx=1
 fq2_idx=2
 sm_idx=3
@@ -36,11 +35,10 @@ optional arguments:
     -l|--logdir : directory within workdir to output log files (default = logs)
     -s|--scriptdir : directory within workdir containing pipeline scripts (default = scripts)
     -d|--delim : delimiter used in sample info file (default = ',')
-    -g|--genome : genome version used (default = hg38)
+    -g|--genome_size : genome size argument passed to macs (default = hs)
 additional info:
-    # sample info file must contain FASTQ names and sample names
-    # peak calling will only be conducted if relevant control sample name in -cs_idx column
-    # possible columns to include in sample_info:
+    # sample info file must minimally contain FASTQ names and sample names
+    # additional columns may be included as listed below:
         - Filename of FASTQ R1 [required]
         - Filename of FASTQ R2 [required - leave blank column for SE]
         - Sample name [required]
@@ -53,7 +51,9 @@ additional info:
         - Platform model [optional]
         - Run date [optional]
         - Predicted median insert size [optional] 
-    # to include any of the above in BAM header, provide column indexes as detailed below
+    # to include any of the above - provide column indexes (see column index arguments)
+    # NB: peak calling is ONLY conducted if control sample index (cs_idx) is provided,
+          and corresponding field is not empty.
     # following resource files must be present in resdir:
         - Whole genome sequence [FASTA and corresponding disctionary file]
         - BWA index files [all index components required]
@@ -62,6 +62,7 @@ column index arguments:
     -f1_idx : index of column containing FASTQ R1 filenames (default = 1)
     -f2_idx : index of column containing FASTQ R2 filenames (default = 2)
     -sm_idx : index of column containing sample names (default = 3)
+    -cs_idx : index of column containing sample name of control (default = null) 
     -id_idx : index of column containing read group ID (default = null)
     -pu_idx : index of column containing platform unit (default = null)
     -lb_idx : index of column containing library name (default = null)
@@ -103,8 +104,8 @@ while [[ $# -gt 0 ]]; do
             delim=$2
             shift
             ;;
-        -g|--genome)
-            genome=$2
+        -g|--genome_size)
+            genome_size=$2
             shift
             ;;
         -f1_idx)
@@ -117,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -sm_idx)
             sm_idx=$2
+            shift
+            ;;
+        -cs_idx)
+            cs_idx=$2
             shift
             ;;
         -lb_idx) 
@@ -195,12 +200,24 @@ function extract_info {
 	'$v1 == v2 {print $v3}' $workdir/$sample_info
 }
 
+# function to list dependencies
+function get_dependencies {
+    job_name=$(echo $sample_name | cut -c1-15)
+    depend_list=$(qstat -wu $USER | grep $job_name | cut -d. -f1 | tr '\n' ',')
+    depend_list=${depend_list//,/,afterok:}
+    depend_list=${depend_list%,*}
+    echo "afterok:$depend_list"
+}
+
 # get unique sample names
 samples=$(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | sort | uniq)
-echo "Sample list: ${samples[@]}" > $log_file
+printf "\nSample list:\n" > $logdir/$log_file
+printf "\t%s\n" ${samples[@]} >> $logdir/$log_file
 
 # loop through sample names
 for sample_name in ${samples[@]}; do
+
+    printf "\nProcessing %s:\n" $sample_name >> $logdir/$log_file
 
     # get all FASTQ files for current sample -> array
     fq1_array=($(extract_info $fq1_idx))
@@ -216,27 +233,103 @@ for sample_name in ${samples[@]}; do
     if [[ ! -z "${pm_idx:-}" ]]; then pm_array=($(extract_info $pm_idx)); fi
     if [[ ! -z "${dt_idx:-}" ]]; then dt_array=($(extract_info $dt_idx)); fi
 
+    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $logdir/$log_file
+
     # loop through each FASTQ1
     for idx in ${!fq1_array[@]}; do
 	
         # assemble command for alignment script with any provided optional args
-        command="bash $workdir/$scriptdir/align_fastq_bwa.sh -f ${fq1_array[$idx]} -n $sample_name"
+        align="bash $workdir/$scriptdir/align_fastq_bwa.sh -f ${fq1_array[$idx]}"
+        align="${align} -n $sample_name.$idx --sm $sample_name"
         
-        if [[ ! -z "${fq2_array[$idx]:-}" ]]; then command="${command} --mate ${fq2_array[$idx]} "; fi 
-        if [[ ! -z "${id_array[$idx]:-}" ]]; then command="${command} --id ${id_array[$idx]} "; fi
-        if [[ ! -z "${pu_array[$idx]:-}" ]]; then command="${command} --pu ${pu_array[$idx]} "; fi
-        if [[ ! -z "${lb_array[$idx]:-}" ]]; then command="${command} --lb ${lb_array[$idx]} "; fi
-       	if [[ ! -z "${cn_array[$idx]:-}" ]]; then command="${command} --cn ${cn_array[$idx]} "; fi
-       	if [[ ! -z "${pl_array[$idx]:-}" ]]; then command="${command} --pl ${pl_array[$idx]} "; fi
-       	if [[ ! -z "${pi_array[$idx]:-}" ]]; then command="${command} --pi ${pi_array[$idx]} "; fi
-       	if [[ ! -z "${pm_array[$idx]:-}" ]]; then command="${command} --pm ${pm_array[$idx]} "; fi
-        if [[ ! -z "${dt_array[$idx]:-}" ]]; then command="${command} --dt ${dt_array[$idx]} "; fi
+        if [[ ! -z "${fq2_array[$idx]:-}" ]]; then align="${align} --mate ${fq2_array[$idx]} "; fi 
+        if [[ ! -z "${id_array[$idx]:-}" ]]; then align="${align} --id ${id_array[$idx]} "; fi
+        if [[ ! -z "${pu_array[$idx]:-}" ]]; then align="${align} --pu ${pu_array[$idx]} "; fi
+        if [[ ! -z "${lb_array[$idx]:-}" ]]; then align="${align} --lb ${lb_array[$idx]} "; fi
+       	if [[ ! -z "${cn_array[$idx]:-}" ]]; then align="${align} --cn ${cn_array[$idx]} "; fi
+       	if [[ ! -z "${pl_array[$idx]:-}" ]]; then align="${align} --pl ${pl_array[$idx]} "; fi
+       	if [[ ! -z "${pi_array[$idx]:-}" ]]; then align="${align} --pi ${pi_array[$idx]} "; fi
+       	if [[ ! -z "${pm_array[$idx]:-}" ]]; then align="${align} --pm ${pm_array[$idx]} "; fi
+        if [[ ! -z "${dt_array[$idx]:-}" ]]; then align="${align} --dt ${dt_array[$idx]} "; fi
 	
 	    # run alignment script
-        echo "$command" > $log_file
-	    $command
+        printf "\tAligning FASTQ: %s with command:\n" $sample_name >> $logdir/$log_file
+        printf "\t\t%s %s \\ \n" $align >> $logdir/$log_file
+	    $align
+       
+        # check return value
+        if [[ $? -ne 0 ]]; then
+            printf "\nERROR: alignment failed - %s\n" $sample_name
+            exit 1
+        fi 
 
+        # add bam to merge list
+        if [[ $idx = 0 ]]; then
+            merge_list=$sample_name.$idx.bam
+        else
+            merge_list="${merge_list},$sample_name.$idx.bam"
+        fi
     done
+
+    # check running jobs -> dependencies
+    depend_list=$(get_dependencies)
+
+    # generate merge command
+    merge="bash $workdir/$scriptdir/merge_bam_picard.sh -i $merge_list"
+    merge="${merge} -n $sample_name --depend $depend_list --validate no"
+    
+    # run merge
+    printf "\tMerging runs with command:\n" >> $logdir/$log_file
+    printf "\t\t%s %s \\ \n" $merge >> $logdir/$log_file
+    $merge
 done
 
+# run peak calling if control samples index provided
+if [[ ! -z "${cs_idx:-}" ]]; then
+    printf "\nCalling peaks with MACS2:\n" >> $logdir/$log_file
+    
+    for sample_name in ${samples[@]}; do  
+        
+        # list control sample names
+        cs_array=($(extract_info $cs_idx))
+        
+        # check control field isnt empty
+        if [[ -z "${cs_array:-}" ]]; then
+            printf "\tWARNING: No control sample for sample %s" $sample_name >> $logdir/$log_file
+            printf ", skipping peak calling\n" >> $logdir/$log_file
+            continue
+        fi
 
+        # get unique control samples
+        cs_array=($(echo ${cs_array[@]} | tr ' ' '\n' | sort -u | tr '\n' ' '))
+        
+        # check only one control sample provided
+        if [[ ${#cs_array[@]} -ne 1 ]]; then
+            printf "\tWARNING: multiple control sample names provided for sample %s:\n" $sample_name
+            printf "\t\t%s\n" ${cs_array[@]}
+            printf "\tWARNING: skipping peak calling"; continue
+        else
+            cs_name=${cs_array[@]}
+        fi
+        
+        # re-check dependencies
+        job_name_1=$(echo $sample_name | cut -c1-15)
+        job_name_2=$(echo $cs_name | cut -c1-15)
+        depend_list=$(qstat -wu $USER | grep -E "$job_name_1|$job_name_2" | cut -d. -f1 | \
+                      sort -g | uniq | tr '\n' ',')
+        depend_list=${depend_list//,/,afterok:}
+        depend_list=${depend_list%,*}
+        depend_list="afterok:$depend_list"
+        
+        # generate command
+        call="bash $workdir/$scriptdir/call_peaks_macs.sh -t $sample_name.bam -c $cs_name.bam"
+        call="${call} -g $genome_size -n $sample_name -e 200 -v no -d $depend_list"
+
+        # run macs script
+        printf "\tCommand for sample %s:\n" $sample_name >> $logdir/$log_file
+        printf "\t\t%s %s \\ \n" $call >> $logdir/$log_file
+        $call
+    done
+else
+    printf "\nNo control sample index provided - skipping peak calling\n" >> $logdir/$log_file
+fi
