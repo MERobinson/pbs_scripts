@@ -4,12 +4,14 @@
 workdir=$PWD
 trackdir=tracks
 bamdir=bam
+resdir=resources
 logdir=logs
 genome=hg38
 extend=200
 quality=10
-dedup=TRUE
+dedup=yes
 binsize=200
+fasta=genome.fa
 
 # help message
 help_message="
@@ -24,20 +26,22 @@ optional arguments:
     -t|--trackdir : output directory for genome tracks (default = tracks)
     -b|--bamdir : directory to find bam files (default = bam)
     -l|--logdir : output directory for log files (default = logs)
+    -r|--resdir : directory within workdir containing FASTA file (default = resources)
     -g|--genome : genome version - used in trackline (default = hg38)
     -n|--name : name prefix for output file (default = BAM filename)
     -e|--extend : bp extension for generating coverage track (default = 200)
     -q|--quality : min alignment quality to filter reads (default = 10)
                    (to disable simply set to 0)
-    -d|--dedup : flag to disable duplicate removal (default = on)
+    -d|--dedup : whether to filter duplicates [yes,no] (default = yes)
     -s|--binsize : binning for track output (default = 200)
+    -f|--fasta : name of genome FASTA file within resdir (default = genome.fa)
 example:
     bash $(basename "$0") -d -g hg38 -i REH_H3K27ac_ChIPseq.bam
 
 "
 
 # parse command line arg
-while [[ $# -gt 0 ]]; do
+while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
         -i|--inbam)
@@ -60,6 +64,10 @@ while [[ $# -gt 0 ]]; do
         logdir=$2
         shift
         ;;
+        -r|--resdir)
+        resdir=$2
+        shift
+        ;;
         -g|--genome)
         genome=$2
         shift
@@ -77,11 +85,15 @@ while [[ $# -gt 0 ]]; do
         shift
         ;;
         -d|--dedup)
-        dedup=FALSE
+        dedup=$2
         shift
         ;;
         -s|--binsize)
         binsize=$2
+        shift
+        ;;
+        -f|--fasta)
+        fasta=$2
         shift
         ;;
         *)
@@ -114,16 +126,18 @@ if [[ -z "$name" ]]; then
 fi
 
 # set dedup argument
-if [[ $dedup = TRUE ]]; then
+if [[ $dedup = yes ]]; then
     dedup_arg="-F 1024"
 fi
 
 # set trackline text
 trackline="track type=bedGraph name=$name visibility=2 windowingFunction=mean autoScale=off"
-trackline=$trackline" smoothingWindow=10 viewLimits=0:20 maxHeightPixels=0:75:150"
+trackline=$trackline" smoothingWindow=10 viewLimits=0:50 maxHeightPixels=0:75:150"
 
 # get list of canonical chromosomes
-#chr_list=$(cat $workdir/$resdir/$fasta | grep -E "^>" | grep -Eo "chr[0-9MXY]+\b") 
+chr_list=$(cat $workdir/$resdir/$fasta | grep -Eo "^>chr[0-9MXY]+\b" | \
+           grep -Eo "chr[0-9XY]+"| tr "\n" " ") 
+echo $chr_list
 
 # create required dirs
 mkdir -p $workdir/$logdir
@@ -132,7 +146,7 @@ mkdir -p $workdir/$trackdir
 # run job
 JOBID=$(cat <<- EOS | qsub -N $name.bwa - 
 	#!/bin/bash
-	#PBS -l walltime=01:00:00
+	#PBS -l walltime=05:00:00
 	#PBS -l select=1:mem=10gb:ncpus=20
 	#PBS -j oe
 	#PBS -q med-bio
@@ -148,7 +162,12 @@ JOBID=$(cat <<- EOS | qsub -N $name.bwa -
 	cp $workdir/$bamdir/$bam* .
 
 	# filter bam prior to making track
-	samtools view -b $dedup_arg -q $quality $name.$genome.bam > $name.$genome.filt.bam
+	samtools view -b $dedup_arg -q $quality $bam $chr_list > $name.$genome.filt.bam
+    samtools index $name.$genome.filt.bam
+
+    # temp - output idxstats
+    samtools idxstats $bam
+    samtools idxstats $name.$genome.filt.bam
 
 	# generate coverage track
 	bamCoverage \

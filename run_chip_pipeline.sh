@@ -55,7 +55,7 @@ additional info:
     # NB: peak calling is ONLY conducted if control sample index (cs_idx) is provided,
           and corresponding field is not empty.
     # following resource files must be present in resdir:
-        - Whole genome sequence [FASTA and corresponding disctionary file]
+        - Whole genome sequence [FASTA and corresponding dictionary file]
         - BWA index files [all index components required]
     # to alter expected resource filenames, see resource filename arguments
 column index arguments:
@@ -163,8 +163,8 @@ while [[ $# -gt 0 ]]; do
         *) 
             echo "Error: Illegal argument"
             echo "$help_message"; exit 1
-	    ;;
-     esac
+        ;;
+    esac
 shift
 done
 
@@ -211,13 +211,13 @@ function get_dependencies {
 
 # get unique sample names
 samples=$(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | sort | uniq)
-printf "\nSample list:\n" > $logdir/$log_file
-printf "\t%s\n" ${samples[@]} >> $logdir/$log_file
+printf "\nSample list:\n" > $workdir/$logdir/$log_file
+printf "\t%s\n" ${samples[@]} >> $workdir/$logdir/$log_file
 
 # loop through sample names
 for sample_name in ${samples[@]}; do
 
-    printf "\nProcessing %s:\n" $sample_name >> $logdir/$log_file
+    printf "\nProcessing %s:\n" $sample_name >> $workdir/$logdir/$log_file
 
     # get all FASTQ files for current sample -> array
     fq1_array=($(extract_info $fq1_idx))
@@ -233,7 +233,7 @@ for sample_name in ${samples[@]}; do
     if [[ ! -z "${pm_idx:-}" ]]; then pm_array=($(extract_info $pm_idx)); fi
     if [[ ! -z "${dt_idx:-}" ]]; then dt_array=($(extract_info $dt_idx)); fi
 
-    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $logdir/$log_file
+    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $workdir/$logdir/$log_file
 
     # loop through each FASTQ1
     for idx in ${!fq1_array[@]}; do
