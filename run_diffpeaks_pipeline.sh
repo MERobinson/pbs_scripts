@@ -1,48 +1,92 @@
+
+### unfinished ###
+
 #!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 set -o nounset
 
-# default arg
+# default arguments
 workdir=$PWD
-bamdir=bam
-outdir=sub
+resdir=resources
 logdir=logs
 scriptdir=scripts
+delim=","
 genome_size=hs
 log_file=$(basename $0 .sh)_$(date "+%Y-%m-%d").log
+
+# sample info index defaults
+test_idx=1
+cntl_idx=2
+
+# resource filename defaults
+fasta=genome.fa
+index=genome.fa
 
 # help message
 help_message="
 usage:
-    bash $(basename "$0") [wfrdg] -s <SAMPLE_INFO>
+    bash $(basename "$0") -i <sample_info.csv>
 purpose:
-    # Takes a BAM file, subsamples and re-calls peaks to look at saturation
+    # pipeline to call differential peaks and ident var in peak regions
+    # calls diff peaks with bdgdiff (macs2) and variants with mutect2 (gatk)
+    # takes as input either a delimited info file detailing comparisons
 required arguments:
-    -b|--bam_list : comma separated list of BAM files to subsample reads from
+    -i|--info : a delimited text file containing sample information (see below)
 optional arguments:
     -w|--workdir : working directory (default = pwd)
-    -i|--indir : directory within workdir containing BAM files (default = bam)
+    -b|--bamdir : directory within workdir containing FASTQ files (default = fastq)
     -r|--resdir : directory within workdir containing resource files (default = resources)
     -l|--logdir : directory within workdir to output log files (default = logs)
     -s|--scriptdir : directory within workdir containing pipeline scripts (default = scripts)
-    -g|--genome_size : genome size argument passed to macs (default = hs)
+    -d|--delim : delimiter used in sample info file (default = ',')
+    -g|--genome : genome version [mm10,hg38] (default = hg38)
+program arguments:
+    --macs_arg : general input for additional macs2 bdgdiff arg - passed as is
+    --mt2_arg : general input for additional mutect2 arguments - passed as is
+additional info:
+    # info file should have 2 columns indicating test and control sample names
+    # as default, expects test samples in column 1 and control in column 2,
+      but this can be altered to the index of any column with following arg:
+        --test_idx : index of column containing test sample names (default = 1)
+        --cntl_idx : index of column containing control sample names (default = 2)
+    # following resource files must be present in resource directory:
+        - Whole genome sequence [FASTA and corresponding dict]
+        - dbSNP [VCF and index]
+        - 
+    # to alter expected resource filenames, see resource filename arguments
+column index arguments:
+    -f1_idx : index of column containing FASTQ R1 filenames (default = 1)
+    -f2_idx : index of column containing FASTQ R2 filenames (default = 2)
+    -sm_idx : index of column containing sample names (default = 3)
+    -cs_idx : index of column containing sample name of control (default = null) 
+    -id_idx : index of column containing read group ID (default = null)
+    -pu_idx : index of column containing platform unit (default = null)
+    -lb_idx : index of column containing library name (default = null)
+    -cn_idx : index of column containing sequencing centre (default = null)
+    -pl_idx : index of column containing platform (default = null)
+    -pi_idx : index of column containing median insert size (deafult = null)
+    -pm_idx : index of column containing platform model (default = null)
+    -dt_idx : index of column containing run date (default = null)
+resource filename arguments:
+    -ix|--index_base : basename of index files in resdir (default = genome.fa)
+    -fa|--fasta : name of FASTA file in resdir (default = genome.fa) 
 
 "
 
 while [[ $# -gt 0 ]]; do
     key=$1
     case $key in
-        -b|--bam_list)
-            bam_list=$2
+        -i|--sampleinfo)
+            sample_info=$2
             shift
             ;;
         -w|--workdir)
             workdir=$2
             shift
             ;;
-        -i|--indir)
-            bamdir=$2
+        -f|--fqdir)
+            fqdir=$2
             shift
             ;;
         -r|--resdir)
@@ -53,12 +97,64 @@ while [[ $# -gt 0 ]]; do
             logdir=$2
             shift
             ;;
-        -s|--scriptdir)
-            scriptdir=$2
+        -d|--delim)
+            delim=$2
             shift
             ;;
         -g|--genome_size)
             genome_size=$2
+            shift
+            ;;
+        -f1_idx)
+            fq1_idx=$2
+            shift
+            ;;
+        -f2_idx)
+            fq2_idx=$2
+            shift
+            ;;
+        -sm_idx)
+            sm_idx=$2
+            shift
+            ;;
+        -cs_idx)
+            cs_idx=$2
+            shift
+            ;;
+        -lb_idx) 
+            lb_idx=$2
+            shift
+            ;;
+        -pu_idx)
+            pu_idx=$2
+            shift
+            ;;
+        -pl_idx)
+            pl_idx=$2
+            shift
+            ;;
+        -cn_idx) 
+            cn_idx=$2
+            shift
+            ;;
+        -pi_idx)
+            pi_idx=$2
+            shift
+            ;;
+        -pm_idx)
+            pm_idx=$2
+            shift
+            ;;
+        -dt_idx)
+            dt_idx=$2
+            shift
+            ;;
+        -ix|--index_base)
+            index=$2
+            shift
+            ;;
+        -fa|--fasta)
+            fasta=$2
             shift
             ;;
         *) 
@@ -70,19 +166,30 @@ shift
 done
 
 # check required arg
-if [[ -z "${bam_list:-}" ]]; then
-	printf "\nERROR: BAM files not provided.\n"
+if [[ -z "${sample_info:-}" ]]; then
+	printf "\nERROR: Sample info file not provided.\n"
 	echo "$help_message"; exit 1
-else
-    IFS="," read -r -a bam_array <<< "$bam_list"
 fi
-for bam in ${bam_array[@]}; do
-    if [[ ! -r $workdir/$bamdir/$bam ]]; then
-        printf "\nERROR: BAM file not readable: %s/%s/%s\n" $workdir $bamdir $bam
-        echo "$help_message"; exit 1
-    fi
-done
-
+if [[ ! -r "$workdir/$sample_info" ]]; then
+	printf "\nERROR: Input sample file doesnt exist/isnt readable: %s/%s\n" $workdir $sample_info
+	echo "$help_message"; exit 1
+fi
+if [[ ! -d "$workdir/$resdir" ]]; then
+	printf "\nERROR: Resources directory doesnt exist: %s/%s\n" $workdir $resdir
+	echo "$help_message"; exit 1
+fi
+if [[ !	-d "$workdir/$fqdir" ]]; then
+    printf "\nERROR: FASTQ directory doesnt exist: %s/%s\n" $workdir $fqdir
+    echo "$help_message"; exit 1
+fi
+if [[ !	-r "$workdir/$resdir/$index" ]]; then
+    printf "\nERROR: Index file doesnt exist/isnt readable: %s/%s/%s\n" $workdir $resdir $index
+    echo "$help_message"; exit 1
+fi
+if [[ ! -r "$workdir/$resdir/$fasta" ]]; then
+    printf "\nERROR: FASTA file doesnt exist/isnt readable: %s/%s/%s\n" $workdir $resdir $fasta
+    echo "$help_message"; exit 1
+fi
 
 # function to extract fields from sample info file
 function extract_info {
@@ -101,13 +208,13 @@ function get_dependencies {
 
 # get unique sample names
 samples=$(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | sort | uniq)
-printf "\nSample list:\n" > $logdir/$log_file
-printf "\t%s\n" ${samples[@]} >> $logdir/$log_file
+printf "\nSample list:\n" > $workdir/$logdir/$log_file
+printf "\t%s\n" ${samples[@]} >> $workdir/$logdir/$log_file
 
 # loop through sample names
 for sample_name in ${samples[@]}; do
 
-    printf "\nProcessing %s:\n" $sample_name >> $logdir/$log_file
+    printf "\nProcessing %s:\n" $sample_name >> $workdir/$logdir/$log_file
 
     # get all FASTQ files for current sample -> array
     fq1_array=($(extract_info $fq1_idx))
@@ -123,7 +230,7 @@ for sample_name in ${samples[@]}; do
     if [[ ! -z "${pm_idx:-}" ]]; then pm_array=($(extract_info $pm_idx)); fi
     if [[ ! -z "${dt_idx:-}" ]]; then dt_array=($(extract_info $dt_idx)); fi
 
-    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $logdir/$log_file
+    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $workdir/$logdir/$log_file
 
     # loop through each FASTQ1
     for idx in ${!fq1_array[@]}; do

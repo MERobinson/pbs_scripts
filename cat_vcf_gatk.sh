@@ -21,6 +21,7 @@ optional arguments:
     -o|--outdir : output directory to create within workdir [string] (default = '')
     -n|--name : name of output file [string] (default = 'combined.vcf')
     --check : whether to check input files [yes,no] (default = 'yes')
+    --depend : dependency list to pass to PBS script - e.g. "afterok:1920830,afterok:1920831"
 additional info:
     # check argument is useful for scheduling future jobs where input files 
       may not presently exist
@@ -52,6 +53,10 @@ while [[ $# -gt 1 ]]; do
             ;;
         --check)
             check=$2
+            shift
+            ;;
+        --depend)
+            depend="#PBS -W depend=$2"
             shift
             ;;
         *)
@@ -108,12 +113,13 @@ mkdir -p $workdir/$outdir/variants
 # cat variants
 jobid=$(cat <<- EOS | qsub -N $name.cat -
 		#!/bin/bash
-		#PBS -l walltime=01:00:00
+		#PBS -l walltime=08:00:00
 		#PBS -l select=1:mem=20gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio
 		#PBS -o $workdir/$outdir/logs/$name.cat_vcf_gatk.log
-		
+		${depend:-}		
+
 		# load modules
 		module load picard/2.6.0
 		module load gatk/3.6
@@ -129,7 +135,7 @@ jobid=$(cat <<- EOS | qsub -N $name.cat -
 			org.broadinstitute.gatk.tools.CatVariants \
 			-R $fasta_base \
 			$v_arg \
-			-out $name
+			-out $name.hc.g.vcf
 
 		cp $name* $workdir/$outdir/variants/
 		

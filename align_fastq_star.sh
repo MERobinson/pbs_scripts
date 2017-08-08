@@ -20,7 +20,7 @@ usage:
 purpose:
 	# Simple wrapper to run STAR alignment.
 required arguments:
-        -f|--fastq : comma separated list of FASTQ files
+    -f|--fastq : comma separated list of FASTQ files
 optional arguments:
 	-m|--mate : comma separated list of read 2 FASTQ if paired end
 	-w|--workdir : working directory - used as base dir for all input/output (default = pwd)

@@ -177,3 +177,4 @@ jobid=$(cat <<- EOS | qsub -N $name.merge -
 	ls -lhAR
 	EOS
 )
+echo "JOBID: $jobid"

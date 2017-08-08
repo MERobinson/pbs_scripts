@@ -144,7 +144,7 @@ mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir/fragsize
 
 # run job
-MACS_JOB=$(cat <<- EOS | qsub -N $name.macs -
+jobid=$(cat <<- EOS | qsub -N $name.macs -
 	#!/bin/bash
 	#PBS -l walltime=10:00:00
 	#PBS -l select=1:mem=10gb:ncpus=4
@@ -202,3 +202,4 @@ MACS_JOB=$(cat <<- EOS | qsub -N $name.macs -
 	ls -lhAR
 	EOS
 )
+echo "JOBID: $jobid"

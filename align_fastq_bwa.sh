@@ -197,7 +197,7 @@ if [[ -z "$sm" ]]; then
 fi
 
 # strip fasta extension (to copy dict)
-fastq_base=${fasta%%.*}
+fasta_base=${fasta%%.*}
 
 # extract read group info (if not provided)
 if [[ $pl = "PLATFORM=ILLUMINA" ]]; then
@@ -219,7 +219,7 @@ mkdir -p $workdir/$trackdir
 # run job
 jobid=$(cat <<- EOS | qsub -N $name.bwa - 
 	#!/bin/bash
-	#PBS -l walltime=60:00:00
+	#PBS -l walltime=30:00:00
 	#PBS -l select=1:mem=40gb:ncpus=20
 	#PBS -j oe
 	#PBS -q med-bio
@@ -308,3 +308,4 @@ jobid=$(cat <<- EOS | qsub -N $name.bwa -
 	ls -lhAR
 	EOS
 )
+echo "JOBID: $jobid"

@@ -194,6 +194,8 @@ if [[ ! -r "$workdir/$resdir/$fasta" ]]; then
     echo "$help_message"; exit 1
 fi
 
+mkdir -p $workdir/logs
+
 # function to extract fields from sample info file
 function extract_info {
 	awk -F $delim -v v1=$sm_idx -v v2=$sample_name -v v3=$1 \
@@ -255,34 +257,52 @@ for sample_name in ${samples[@]}; do
 	    # run alignment script
         printf "\tAligning FASTQ: %s with command:\n" $sample_name >> $logdir/$log_file
         printf "\t\t%s %s \\ \n" $align >> $logdir/$log_file
-	    $align
+	    $align > tmp.log
        
-        # check return value
+        # check return value and add jobid/filename to merge input lists
         if [[ $? -ne 0 ]]; then
             printf "\nERROR: alignment failed - %s\n" $sample_name
+            rm tmp.log
             exit 1
-        fi 
-
-        # add bam to merge list
-        if [[ $idx = 0 ]]; then
-            merge_list=$sample_name.$idx.bam
+        elif [[ $idx = 0 ]]; then
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+            merge_depend="afterok:${jobid}"
+            merge_list="$sample_name.$idx.bam"
         else
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+            merge_depend="${merge_depend},afterok:${jobid}"
             merge_list="${merge_list},$sample_name.$idx.bam"
         fi
+        rm tmp.log
     done
-
-    # check running jobs -> dependencies
-    depend_list=$(get_dependencies)
 
     # generate merge command
     merge="bash $workdir/$scriptdir/merge_bam_picard.sh -i $merge_list"
-    merge="${merge} -n $sample_name --depend $depend_list --validate no"
+    merge="${merge} -n $sample_name --depend $merge_depend --validate no"
     
     # run merge
     printf "\tMerging runs with command:\n" >> $logdir/$log_file
     printf "\t\t%s %s \\ \n" $merge >> $logdir/$log_file
-    $merge
+    $merge > tmp.log
+
+    # check return/jobids
+    unset depend
+    if [[ $? -ne 0 ]]; then
+        printf "\nERROR: merge job failed - %s\n" $sample_name
+        rm tmp.log
+        exit 1
+    else
+        jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+    fi
+    macs_depend="${macs_depend:-},afterok:${jobid}"
+    rm tmp.log
+
+    # generate tracks
+    tracks="bash $workdir/$scriptdir/generate_track_deeptools.sh -i $sample_name.bam"
+    $tracks 
+
 done
+macs_depend=${macs_depend#*,}
 
 # run peak calling if control samples index provided
 if [[ ! -z "${cs_idx:-}" ]]; then
@@ -312,18 +332,9 @@ if [[ ! -z "${cs_idx:-}" ]]; then
             cs_name=${cs_array[@]}
         fi
         
-        # re-check dependencies
-        job_name_1=$(echo $sample_name | cut -c1-15)
-        job_name_2=$(echo $cs_name | cut -c1-15)
-        depend_list=$(qstat -wu $USER | grep -E "$job_name_1|$job_name_2" | cut -d. -f1 | \
-                      sort -g | uniq | tr '\n' ',')
-        depend_list=${depend_list//,/,afterok:}
-        depend_list=${depend_list%,*}
-        depend_list="afterok:$depend_list"
-        
-        # generate command
+        # compile command
         call="bash $workdir/$scriptdir/call_peaks_macs.sh -t $sample_name.bam -c $cs_name.bam"
-        call="${call} -g $genome_size -n $sample_name -e 200 -v no -d $depend_list"
+        call="${call} -g $genome_size -n $sample_name -e 200 -v no -d $macs_depend"
 
         # run macs script
         printf "\tCommand for sample %s:\n" $sample_name >> $logdir/$log_file

@@ -152,7 +152,7 @@ fi
 # call variants
 jobid=$(cat <<- EOS | qsub -N $name.var -
 		#!/usr/bin/env bash
-		#PBS -l walltime=60:00:00
+		#PBS -l walltime=20:00:00
 		#PBS -l select=1:mem=40gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio

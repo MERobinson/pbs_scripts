@@ -137,7 +137,6 @@ trackline=$trackline" smoothingWindow=10 viewLimits=0:50 maxHeightPixels=0:75:15
 # get list of canonical chromosomes
 chr_list=$(cat $workdir/$resdir/$fasta | grep -Eo "^>chr[0-9MXY]+\b" | \
            grep -Eo "chr[0-9XY]+"| tr "\n" " ") 
-echo $chr_list
 
 # create required dirs
 mkdir -p $workdir/$logdir
@@ -179,9 +178,10 @@ JOBID=$(cat <<- EOS | qsub -N $name.bwa -
 		--outFileFormat "bedgraph" \
 		--bam $name.$genome.filt.bam \
 		--outFileName $name.$genome.bedGraph
-	echo $trackline | cat - $name.$genome.bedGraph > tmp.bedGraph
-	mv tmp.bedGraph $workdir/$trackdir/$name.$genome.bedGraph
-
+	cat $name.$genome.bedGraph | grep -E "^chr[0-9XYM]+\b" > tmp.txt
+	echo $trackline | cat - tmp.txt > $name.$genome.bedGraph
+	
+	cp $name.$genome.bedGraph $workdir/$trackdir
 	ls -lhAR
 	EOS
 )

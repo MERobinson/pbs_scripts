@@ -212,7 +212,8 @@ function get_dependencies {
 }
 
 # get unique sample names
-samples=$(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | sort | uniq)
+samples=($(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | \
+           grep -E "[0-9]+C" | sort | uniq))
 printf "\nSample list:\n" > $workdir/$logdir/$log_file
 printf "\t%s\n" ${samples[@]} >> $workdir/$logdir/$log_file
 
@@ -227,6 +228,8 @@ chr_list=($(cat $workdir/$resdir/$fasta | grep -Eo "^>chr[0-9XYM]+\b" | grep -Eo
 # call germline variants with haplotype caller
 for sample_name in ${samples[@]}; do
     
+    echo "Processing sample $sample_name"
+
     #declare var to store args
     v_arg=''
     depend=''
@@ -252,9 +255,10 @@ for sample_name in ${samples[@]}; do
             cat tmp.log
             exit 1
         else
-            jobid=$(cat tmp.log | grep -E "^JOBID:" | grep -Eo "[0-9]+")
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
             depend=${depend}",afterok:${jobid}"
             v_arg=${v_arg}",variants/${sample_name}.${chr}.hc.g.vcf"
+            cat tmp.log >> $workdir/$logdir/$log_file
             rm tmp.log
         fi
     done
@@ -271,11 +275,4 @@ for sample_name in ${samples[@]}; do
     printf "\t\t%s %s \\ \n" $cat_call >> $workdir/$logdir/$log_file
     $cat_call > tmp.log
 
-    exit
-
 done
-
-
-
- 
-
