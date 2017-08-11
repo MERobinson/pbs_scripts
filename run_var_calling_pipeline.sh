@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -o errexit
 set -o pipefail
 set -o nounset
 
@@ -163,7 +162,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         *)
-            echo "Error: Illegal argument"
+            printf "\nERROR: Illegal argument: %s %s\n" $1 $2
             echo "$help_message"; exit 1
         ;;
     esac
@@ -226,20 +225,20 @@ done
 chr_list=($(cat $workdir/$resdir/$fasta | grep -Eo "^>chr[0-9XYM]+\b" | grep -Eo "chr[0-9MYX]+"))
 
 # call germline variants with haplotype caller
+echo "Calling germline variants"
+ggvcf_g_arg=''
+ggvcf_depend=''
 for sample_name in ${samples[@]}; do
     
-    echo "Processing sample $sample_name"
-
-    #declare var to store args
-    v_arg=''
-    depend=''
-
-    # call each chr seperately
+    echo "Processing sample: $sample_name"
+    cat_v_arg=''
+    cat_depend=''
     for chr in ${chr_list[@]}; do
         
         # assemble haplotype caller command
-        hc_call="bash $workdir/$scriptdir/call_var_hc.sh -b $bamdir/$sample_name.recal.bam"
-        hc_call="${hc_call} -f $resdir/$fasta --gvcf yes --intervals $chr"
+        hc_call="bash $workdir/$scriptdir/call_var_hc.sh --bam $bamdir/$sample_name.recal.bam"
+        hc_call="${hc_call} --outdir variants --logdir $logdir"
+        hc_call="${hc_call} --fasta $resdir/$fasta --gvcf yes --chr $chr"
         hc_call="${hc_call} --dbsnp $resdir/$dbsnp --check no --name $sample_name.$chr"
         
         # run haplotype caller
@@ -256,23 +255,79 @@ for sample_name in ${samples[@]}; do
             exit 1
         else
             jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
-            depend=${depend}",afterok:${jobid}"
-            v_arg=${v_arg}",variants/${sample_name}.${chr}.hc.g.vcf"
-            cat tmp.log >> $workdir/$logdir/$log_file
+            cat_v_arg=${cat_v_arg}",variants/${sample_name}.${chr}.hc.g.vcf"
+            cat_depend=${cat_depend}",afterok:${jobid}"
             rm tmp.log
         fi
     done
-
-    # remove leading commas
-    depend=${depend#*,}
-    v_arg=${v_arg#*,}
+    cat_v_arg=${cat_v_arg#*,}
+    cat_depend=${cat_depend#*,}
+   
     
     # combine chr var
-    cat_call="bash $workdir/$scriptdir/cat_vcf_gatk.sh -v $v_arg --depend $depend"
+    ## edit output/logdir dir for cat script and update this ##
+    cat_call="bash $workdir/$scriptdir/cat_vcf_gatk.sh -v $cat_v_arg --depend $cat_depend"
     cat_call="${cat_call} -f $resdir/$fasta --check no --name $sample_name"
     printf "\tConcatenating chromosome variants for sample %s with command:\n" \
            $sample_name >> $workdir/$logdir/$log_file
     printf "\t\t%s %s \\ \n" $cat_call >> $workdir/$logdir/$log_file
     $cat_call > tmp.log
 
+    # check return value / record jobid & filename
+    if [[ $? -ne 0 ]]; then
+        printf "\nERROR: cat vcf script failed for sample: %s\n" $sample_name
+        echo "stderr: "
+        cat tmp.log
+        exit 1
+    else
+        jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+        ggvcf_g_arg="${ggvcf_g_arg},variants/${sample_name}.hc.g.vcf"
+        ggvcf_depend="${ggvcf_depend},afterok:${jobid}"
+        rm tmp.log
+    fi
 done
+ggvcf_g_arg=${ggvcf_g_arg#*,}
+ggvcf_depend=${ggvcf_depend#*,}
+
+## joint genotyping
+cat_depend=''; cat_v_arg=''
+for chr in ${chr_list[@]}; do
+
+    # assemble genotypeGVCFs command
+    ggvcf_call="bash $workdir/$scriptdir/genotype_gvcf_gatk.sh"
+    ggvcf_call="${ggvcf_call} --gvcf $ggvcf_g_arg --fasta $resdir/$fasta --chr $chr"
+    ggvcf_call="${ggvcf_call} --outdir variants --logdir $logdir --depend $ggvcf_depend"
+    ggvcf_call="${ggvcf_call} --check no --name $sample_name.$chr"
+
+    # run haplotype caller
+    printf "\tPerforming joint genotyping for sample %s, %s with command:\n" \
+            $sample_name $chr >> $workdir/$logdir/$log_file
+    printf "\t\t%s %s \\ \n" $ggvcf_call >> $workdir/$logdir/$log_file
+    $ggvcf_call > tmp.log
+
+    # check return value / record jobid & filename
+    if [[ $? -ne 0 ]]; then
+        printf "\nERROR: GenotypeGVCF script failed for sample: %s\n" $sample_name
+        echo "stderr: "
+        cat tmp.log
+        exit 1
+    else
+        jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+        cat_depend=${cat_depend}",afterok:${jobid}"
+        cat_v_arg=${cat_v_arg}",variants/${sample_name}.${chr}.vcf"
+        rm tmp.log
+    fi
+done
+cat_depend=${cat_depend#*,}
+cat_v_arg=${cat_v_arg#*,}
+
+# combine chr var
+## edit output/logdir dir for cat script and update this ##
+cat_call="bash $workdir/$scriptdir/cat_vcf_gatk.sh -v $cat_v_arg --depend $cat_depend"
+cat_call="${cat_call} --fasta $resdir/$fasta --check no --name $sample_name"
+printf "\tConcatenating chromosome variants for sample %s with command:\n" \
+        $sample_name >> $workdir/$logdir/$log_file
+printf "\t\t%s %s \\ \n" $cat_call >> $workdir/$logdir/$log_file
+$cat_call
+
+

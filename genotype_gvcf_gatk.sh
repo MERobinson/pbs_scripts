@@ -19,17 +19,25 @@ required arguments:
     -g|--gvcf : comma separated list of GVCF files
     -f|--fasta : whole genome FASTA used for generating GVCF
 optional aruments:
-    -o|--outdir : output directory relative to current directory for output (default = NULL)
+    -o|--outdir : output directory for VCF files (default = '.')
     -n|--name : prefix to give output files [string] (default = 'germline_var')
-    -l|--logir : output directory for log file (if different to outdir) (default = NULL)
-    --check : whether to check arguments prior to running PBS script [yes|no] (default = 'yes')
+    -l|--logir : output dir for log files [string] (default = --outdir value)
+    --chr : chromosome to restrict analysis to [string] (default = NULL)
+    --intervals : intervals file (passed to GATK as intervals arg)
+    --check : whether to check input files [yes|no] (default = 'yes')
     --depend : list of job dependencies to pass to PBS script (default = NULL)
 output:
     # outputs VCF and index in outdir & run log in logdir
+additional info:
+    # outdir/logdir paths should be given relative to current working dir, 
+      and are created if not already present 
+    # check and depend arguments are used for job scheduling/pieplines
+    # intervals and chr arguments are optional but if provided,
+      they will be passed to GenotypeGVCFs
 
 "
 
-# parse arguments
+# parse arg
 while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
@@ -61,17 +69,29 @@ while [[ $# -gt 1 ]]; do
             depend=$2
             shift
             ;;
+        --intervals)
+            intervals=$2
+            shift
+            ;;
+        --chr)
+            chr=$2
+            shift
+            ;;
+        --depend)
+            depend="#PBS -W depend=$2"
+            shift
+            ;;
         *)
-            printf "\nERROR: undefined argument provided\n"
-            echo "$help_message"
+            printf "\nERROR: undefined argument provided: %s\n" $1
+            echo "$help_message"; exit 1
             ;;
     esac
     shift
 done
 
-# set scriptdir
-if [[ -z ${scriptdir:-} ]]; then
-    scriptdir=$outdir
+# set logdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=$outdir
 fi
 
 # check required arguments
@@ -100,26 +120,47 @@ if [[ $check = yes ]]; then
     done
 fi
 
-# fasta file basename
-fasta_base=${fasta%%.*}
+# fasta prefix (for copying dict/idx)
+fasta_prefix=${fasta%%.*}
 fasta=$(basename "$fasta")
+
+# seyup output dir
+mkdir -p $workdir/$outdir
+mkdir -p $workdir/$logdir
 
 # set args for each gcvf
 for gvcf in ${gvcf_array[@]}; do
     gvcf_base=$(basename "$gvcf")
-    gatk_arg="${gatk_arg:-} --variant $gvcf_base"
-    cp_arg="${cp_arg:-}; cp $workdir/$gvcf* ."
+    gvcf_gatk_arg="${gvcf_gatk_arg:-} --variant $gvcf_base"
+    gvcf_cp_arg="${gvcf_cp_arg:-}; cp $workdir/$gvcf* ."
 done
-gatk_arg=${gatk_arg#* }
-cp_arg=${cp_arg#*; }
+gvcf_gatk_arg=${gvcf_gatk_arg#* }
+gvcf_cp_arg=${gvcf_cp_arg#*; }
+
+# optional intervals arg
+if [[ ! -z ${intervals:-} ]]; then
+    if [[ $check = yes ]] && [[ ! -r $workdir/$intervals ]]; then
+        printf "\nERROR: intervals file not found/not readable: %s/%s\n" $workdir $intervals
+        echo "$help_message"; exit 2
+    else
+        intervals_base=$(basename $intervals)
+        intervals_cp_arg="cp $workdir/$intervals* ."
+        intervals_gatk_arg="-L $intervals_base"
+    fi
+fi
+if [[ ! -z ${chr:-} ]]; then
+    chr_gatk_arg="-L $chr"
+fi
 
 # run pbs script
 jobid=$(cat <<- EOS | qsub -N $name.ggvcf -
-		#!/bin/bash
-		#PBS -j oe
-		#PBS -l walltime=05:00:00
+		#!/usr/bin/env bash
+		#PBS -l walltime=10:00:00
 		#PBS -l select=1:mem=40gb:ncpus=1
-		#PBS -o $workdir/$outdir/$name.genotype_gvcf_gatk.log
+		#PBS -j oe
+		#PBS -q med-bio
+		#PBS -o $workdir/$logdir/$name.genotype_gvcf_gatk.log
+		${depend:-}
 
 		# load modules
 		module load java/jdk-8u66
@@ -128,16 +169,19 @@ jobid=$(cat <<- EOS | qsub -N $name.ggvcf -
 		module load picard/2.6.0
 
 		# copy files to scratch
-		$cp_arg
-		cp -rL $workdir/$fasta_base* .
+		$gvcf_cp_arg
+		${intervals_cp_arg:-}
+		cp -rL $workdir/$fasta_prefix* .
 
 		java -jar /apps/gatk/3.6/GenomeAnalysisTK.jar \
 			-T GenotypeGVCFs \
 			-R $fasta \
-			-o $name.g.vcf \
-			$gatk_arg
+			-o $name.vcf \
+			$gvcf_gatk_arg \
+			${intervals_gatk_arg:-} \
+			${chr_gatk_arg:-}
 
-		cp $name.g.vcf* $workdir/$outdir
+		cp $name.vcf* $workdir/$outdir
 	EOS
 )
 echo "JOBID: $jobid"

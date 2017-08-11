@@ -19,21 +19,23 @@ required arguments:
     -b|--bam : aligned and preprocessed BAM file
     -f|--fasta : whole genome FASTA file
 optional arguments:
-    -o|--outdir : output directory to create within workdir [string] (default = '')
+    -o|--outdir : output directory for VCF files [string] (default = '.')
     -n|--name : prefix to give output files [string] (default = extracted from bam)
+    -l|--logdir : output dir for log files [string] (default = --outdir value)
     --gvcf : whether to run in GVCF mode [yes,no] (default = 'no')
     --intervals : intervals file [BED,interval] (default = NULL)
+    --chr : chromosome to restrict analysis to [string] (default = NULL)
     --dbsnp : dbSNP file [VCF] (default = NULL)
-    --check : whether to check input files [yes,no] (default = 'yes')
-    --depend : list of dependencies for PBS script (e.g. afterok:012345,afterok:012346)
+    --check : whether to check input files [yes|no] (default = 'yes')
+    --depend : list of dependencies for PBS script [string] (e.g. afterok:012345,afterok:012346)
 additional info:
-    # check argument is useful for scheduling future jobs where input files 
-      may not presently exist
-    # interval, dbsnp and gvcf arguments are all optional but
+    # outdir/logdir paths should be given relative to current working dir, 
+      and are created if not already present 
+    # check and depend arguments are used for job scheduling/pieplines
+    # intervals, chr, dbsnp and gvcf arguments are all optional but
       if provided, they will be passed to HaplotypeCaller
 output:
-    # creates logs and variants directories in outdir containing 
-      run log and output VCF files respectively
+    # outputs VCF and index file to outdir & run log to logdir
 "
 
 # parse arg
@@ -56,6 +58,10 @@ while [[ $# -gt 1 ]]; do
             name=$2
             shift
             ;;
+        -l|--logdir)
+            logdir=$2
+            shift
+            ;;
         --gvcf)
             gvcf=$2
             shift
@@ -68,6 +74,10 @@ while [[ $# -gt 1 ]]; do
             intervals=$2
             shift
             ;;
+        --chr)
+            chr=$2
+            shift
+            ;;
         --dbsnp)
             dbsnp=$2
             shift
@@ -78,29 +88,34 @@ while [[ $# -gt 1 ]]; do
             ;;
         *)
             printf "\nERROR: Undefined argument provided\n"
-            echo "$help_message"; exit 2
+            echo "$help_message"; exit 1
             ;;
     esac
     shift
 done
 
+# set logdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=$outdir
+fi
+
 # check required arg
 if [[ -z ${bam:-} ]]; then
 	printf "\nERROR: no bam argument provided\n"
-	echo "$help_message"; exit 2
+	echo "$help_message"; exit 1
 elif [[ -z ${fasta:-} ]]; then
     printf "\nERROR: no FASTA argument provided\n"
-    echo "$help_message"; exit 2
+    echo "$help_message"; exit 1
 fi
 
 # check files unless flagged
 if [[ $check = yes ]]; then
     if [[ ! -r $workdir/$bam ]]; then
         printf "\nERROR: bam file is not readable: %s/%s\n" $workdir $bam
-        echo "$help_message"; exit 2
+        echo "$help_message"; exit 1
     elif [[ ! -r $workdir/$fasta ]]; then
         printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
-        echo "$help_message"; exit 2
+        echo "$help_message"; exit 1
     fi
 fi
 
@@ -112,12 +127,12 @@ fi
 
 # get basenames/prefix
 bam_base=$(basename "$bam")
-fasta_base=$(basename "$fasta")
 fasta_prefix=${fasta%%.*}
+fasta=$(basename "$fasta")
 
-# setup output directories
-mkdir -p $workdir/$outdir/logs
-mkdir -p $workdir/$outdir/variants
+# setup output dir
+mkdir -p $workdir/$outdir
+mkdir -p $workdir/$logdir
 
 # gvcf options
 if [[ $gvcf = "yes" ]]; then
@@ -148,6 +163,9 @@ if [[ ! -z ${dbsnp:-} ]]; then
         dbsnp_arg="--dbsnp $dbsnp_base"
     fi
 fi
+if [[ ! -z ${chr:-} ]]; then
+    chr_arg="-L $chr"
+fi
 
 # call variants
 jobid=$(cat <<- EOS | qsub -N $name.var -
@@ -156,7 +174,7 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 		#PBS -l select=1:mem=40gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio
-		#PBS -o $workdir/$outdir/logs/$name.call_var_hc.$vcf_ext.log
+		#PBS -o $workdir/$logdir/$name.call_var_hc.$vcf_ext.log
 		${depend:-}
 
 		# load modules
@@ -174,17 +192,15 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 		# call
 		java -jar /apps/gatk/3.6/GenomeAnalysisTK.jar \
 			-T HaplotypeCaller \
-			-R $fasta_base \
+			-R $fasta \
 			-I $bam_base \
 			-o $name.hc.$vcf_ext \
 			${gvcf_arg:-} \
 			${intervals_arg:-} \
 			${dbsnp_arg:-}
 
-		cp $name.hc.$vcf_ext* $workdir/$outdir/variants/
+		cp $name.hc.$vcf_ext* $workdir/$outdir
 		
-        printf "DATE: %s\n" $(date "+%Y-%m-%d")
-        printf "JOBID: %s\n" '${PBS_JOBID:-}'
         ls -lhAR
 	EOS
 )
