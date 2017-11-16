@@ -20,14 +20,16 @@ required arguments:
 optional arguments:
     -c|--control : control sample alignments [BAM] (default = NULL)
     --intervals : intervals file [BED,interval] (default = NULL)
+    --chr : chromosome to restrict analysis to [string] (default = NULL)
     --dbsnp : dbSNP file [VCF] (default = NULL)
     --cosmic : cosmic file [VCF] (default = NULL)
     --pon : PON file [VCF] (default = NULL)
-    -o|--outdir : output directory to create within workdir [string] (default = '')
+    -o|--outdir : output directory [string] (default = '.')
+    -l|--logdir : output directory for log files [string] (default = --outdir)
     -n|--name : prefix to give output files [string] (default = extracted from bam)
     --check : whether to check input files [yes,no] (default = 'yes')
 additional info:
-    # check argument is useful for scheduling futre jobs where input files 
+    # check argument is useful for scheduling jobs where input files 
       may not presently exist
     # control, intervals, dbsnp, cosmic and pon arguments are all optional but
       if provided, they will be passed to mutect2
@@ -56,6 +58,10 @@ while [[ $# -gt 1 ]]; do
             outdir=$2
             shift
             ;;
+        -l|--logdir)
+            logdir=$2
+            shift
+            ;;
         -n|--name)
             name=$2
             shift
@@ -66,6 +72,10 @@ while [[ $# -gt 1 ]]; do
             ;;
         --intervals)
             intervals=$2
+            shift
+            ;;
+        --chr)
+            chr=$2
             shift
             ;;
         --dbsnp)
@@ -81,12 +91,17 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         *)
-            printf "\nERROR: Undefined argument provided\n"
+            printf "\nERROR: Undefined argument provided: %s %s\n" $1 $2
             echo "$help_message"; exit 2
             ;;
     esac
     shift
 done
+
+# set logdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=$outdir
+fi
 
 # check required arg
 if [[ -z ${tumor:-} ]]; then
@@ -131,7 +146,7 @@ if [[ ! -z ${control:-} ]]; then
     else
         control_base=$(basename $control)
         control_cp="cp $workdir/$control* ."
-        control_arg="-I:control $control_base"
+        control_arg="-I:normal $control_base"
     fi
 fi
 if [[ ! -z ${intervals:-} ]]; then
@@ -161,7 +176,7 @@ if [[ ! -z ${cosmic:-} ]]; then
     else
         cosmic_base=$(basename $cosmic)
         cosmic_cp="cp $workdir/$cosmic* ."
-        cosmic_arg="--dbsnp $cosmic_base"
+        cosmic_arg="--cosmic $cosmic_base"
     fi
 fi
 if [[ ! -z ${pon:-} ]]; then
@@ -171,8 +186,11 @@ if [[ ! -z ${pon:-} ]]; then
     else
         pon_base=$(basename $pon)
         pon_cp="cp $workdir/$pon* ."
-        pon_arg="--dbsnp $pon_base"
+        pon_arg="--normal_panel $pon_base"
     fi
+fi
+if [[ ! -z ${chr:-} ]]; then
+    chr_arg="-L $chr"
 fi
 
 
@@ -183,7 +201,7 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 		#PBS -l select=1:mem=40gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio
-		#PBS -o $workdir/$outdir/logs/$name.call_var_mutect2.log
+		#PBS -o $workdir/$logdir/$name.call_var_mutect2.log
 		
 		# load modules
 		module load picard/2.6.0
@@ -206,10 +224,14 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 			-R $fasta_base \
 			-I:tumor $tumor_base \
 			-o $name.mutect2.vcf \
-			${control_arg:-} ${intervals_arg:-} \
-			${dbsnp_arg:-} ${cosmic_arg:-} ${pon_arg:-}
+			${control_arg:-} \
+			${intervals_arg:-} \
+			${chr_arg:-} \
+			${dbsnp_arg:-} \
+			${cosmic_arg:-} \
+			${pon_arg:-}
 
-		cp $name.mutect2.vcf* $workdir/$outdir/variants/
+		cp $name.mutect2.vcf* $workdir/$outdir/
 		ls -lhAR
 	EOS
 )

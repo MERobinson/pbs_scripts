@@ -1,4 +1,4 @@
-#!/user/bin/env bash
+#!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 set -o nounset
@@ -10,17 +10,17 @@ check='yes'
 
 # help message
 help_message="
+Wrapper to align reads with STAR and produce BAM & counts.
+
 usage:
     bash $(basename "$0") [-options] -f1 <FASTQ1> -F <FASTA> -I <INDEX>
-purpose:
-    # Wrapper script to run STAR via PBS script
 required arguments:
     -f1|--fastq1 : input FASTQ file
     -I|--index : STAR index directory
 optional arguments:
     -f2|--fastq2 : mate FASTQ file if PE [FASTQ] (default = NULL)
     -n|--name : prefix for output files [string] (default = extracted from fastq)
-    -o|--outdir : output directory [string] (default = ".")
+    -o|--outdir : output directory [string] (default = '.')
     -l|--logdir : output dir for log files [string] (default = --outdir)
     --check : whether to check input files [yes|no] (default = 'yes')
     --depend : list of PBS dependencies [string] (default = NULL)
@@ -96,16 +96,18 @@ if [[ $check = yes ]]; then
     if [[ ! -r $workdir/$fq1 ]]; then
         printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq1
         echo "$help_message"; exit 1
-    fi
-    if [[ ! -z ${fq2:-} ]] & [[ ! -r $workdir/$fq2 ]]; then
+    elif [[ ! -z ${fq2:-} ]] & [[ ! -r $workdir/${fq2:-} ]]; then
         printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq2
+        echo "$help_message"; exit 1
+    elif [[ ! -r $workdir/$index ]]; then
+        printf "\nERROR: Index folder is not readable: %s/%s\n" $workdir $index
         echo "$help_message"; exit 1
     fi
 fi
 
 # get sample name if not provided
 if [[ -z ${name:-} ]]; then
-    name=$(basename ${fq1})
+    name=$(basename "$fq1")
     name=${name%%.*}
 fi
 
@@ -139,7 +141,7 @@ jobid=$(cat <<- EOS | qsub -N $name.star -
 		#PBS -q med-bio
 		#PBS -o $workdir/$logdir/$name.align_fastq_star.log
 		${depend:-}
-		
+
 		# load modules
 		module load samtools/1.2
 		module load star/2.5.0
@@ -147,9 +149,9 @@ jobid=$(cat <<- EOS | qsub -N $name.star -
 		module load gcc/5.4.0
 		
 		# copy files to scratch
-		cp -rL $workdir/$index* .
+		cp -rL $workdir/$index .
 		cp -L $workdir/$fq1 .
-		$fq2_cp_arg
+		${fq2_cp_arg:-}
 
 		# run STAR
 		STAR --runMode alignReads \
@@ -167,18 +169,20 @@ jobid=$(cat <<- EOS | qsub -N $name.star -
 			--outSAMstrandField intonMotif \
 			--quantMode GeneCounts \
 			--readNameSeparator _ \
-			--outFileNamePrefix ${name}_ \
+			--outFileNamePrefix ${name}.star. \
 			--outBAMsortingThreadN 20 \
 			--outSAMtype BAM SortedByCoordinate \
 			--outWigType wiggle \
 			--outWigStrand Unstranded \
 			${compress_arg:-}
 	
-		# index bam 
-		samools index  ${name}_Aligned.sortedByCoord.out.bam 
+
+		# index bam
+		mv ${name}.star.Aligned.sortedByCoord.out.bam $name.star.bam 
+		samtools index ${name}.star.bam
 		
 		# copy output to outdir
-		cp ${name}_* $workdir/$outdir
+		cp ${name}.star.* $workdir/$outdir
 
 		ls -lhAR
 		EOS

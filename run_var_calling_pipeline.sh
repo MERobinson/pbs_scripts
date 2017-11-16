@@ -201,15 +201,6 @@ function extract_info {
     '$v1 == v2 {print $v3}' $workdir/$sample_info
 }
 
-# function to list dependencies
-function get_dependencies {
-    job_name=$(echo $sample_name | cut -c1-15)
-    depend_list=$(qstat -wu $USER | grep $job_name | cut -d. -f1 | tr '\n' ',')
-    depend_list=${depend_list//,/,afterok:}
-    depend_list=${depend_list%,*}
-    echo "afterok:$depend_list"
-}
-
 # get unique sample names
 samples=($(tail -n +2 "$sample_info" | cut -d "$delim" -f "$sm_idx" | \
            grep -E "[0-9]+C" | sort | uniq))
@@ -224,7 +215,10 @@ done
 # get list of standard chromosomes from fasta file
 chr_list=($(cat $workdir/$resdir/$fasta | grep -Eo "^>chr[0-9XYM]+\b" | grep -Eo "chr[0-9MYX]+"))
 
-# call germline variants with haplotype caller
+######################################################
+########### Germline SNV/indel calling ###############
+######################################################
+
 echo "Calling germline variants"
 ggvcf_g_arg=''
 ggvcf_depend=''
@@ -331,3 +325,122 @@ printf "\t\t%s %s \\ \n" $cat_call >> $workdir/$logdir/$log_file
 $cat_call
 
 
+######################################################
+############## Germline SV calling ###################
+######################################################
+
+echo "Calling germline structural variants"
+cat_arg=''
+cat_depend=''
+for var in INS DEL INV BND DUP; do
+
+    # discover var
+    echo "Processing sample: $sample_name"
+    merge_arg=''
+    merge_depend=''
+    for sample_name in ${samples[@]}; do
+        # assemble haplotype caller command
+        delly_call="bash $workdir/$scriptdir/call_sv_delly.sh --test $bamdir/$sample_name.recal.bam"
+        delly_call="${delly_call} -v $var --outdir variants --logdir $logdir --name $sample_name"
+        delly_call="${delly_call} --fasta $resdir/$fasta --excl $resdir/$exclude --check no"
+
+        # run delly to discover sv
+        printf "\tCalling %s variants for sample %s with command:\n" \
+                $var $sample_name >> $workdir/$logdir/$log_file
+        printf "\t\t%s %s \\ \n" $delly_call >> $workdir/$logdir/$log_file
+        $delly_call > tmp.log
+
+        # check return value
+        if [[ $? -ne 0 ]]; then
+            printf "\nERROR: call_sv_delly failed for sample: %s\n" $sample_name
+            echo "stderr: "
+            cat tmp.log
+            exit 1
+        else
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+            merge_arg=${merge_arg}",variants/${sample_name}.$var.delly.bcf"
+            merge_depend=${merge_depend}",afterok:${jobid}"
+            rm tmp.log
+        fi
+    done
+    merge_arg=${merge_arg#*,}
+    merge_depend=${merge_depend#*,}
+
+    # merge var accross samples
+    merge_call="bash $workdir/$scriptdir/merge_sv_delly.sh --var $var --depend $merge_depend"
+    merge_call="${cat_call} --sv_list $merge_arg --check no --name $sample_name"
+    merge_call="${merge_call} --outdir variants --logdir $logdir" 
+    merge_call="${merge_call} --delly_arg '-m 500 -b 500 -r 0.5'"
+    printf "\tMerging %s variants with command:\n" \
+           $var >> $workdir/$logdir/$log_file
+    printf "\t\t%s %s \\ \n" $merge_call >> $workdir/$logdir/$log_file
+    $merge_call > tmp.log
+
+    # check return value
+    if [[ $? -ne 0 ]]; then
+        printf "\nERROR: call_sv_delly failed for sample: %s\n" $sample_name
+        echo "stderr: "
+        cat tmp.log; rm tmp.log; exit 1
+    else
+        recall_depend="afterok:${jobid}"
+        rm tmp.log
+    fi
+
+    # joint genotyping of sv
+    merge_arg=''
+    merge_depend=''
+    for sample_name in ${samples[@]}; do
+        # assemble delly call command
+        delly_call="bash $workdir/$scriptdir/call_sv_delly.sh --test $bamdir/$sample_name.recal.bam"
+        delly_call="${delly_call} --var $var --outdir variants --logdir $logdir --name $sample_name"
+        delly_call="${delly_call} --fasta $resdir/$fasta --excl $resdir/$exclude --check no"
+        delly_call="${delly_call} --depend $recall_depend"
+        delly_call="${delly_call} --vcf variants/$sample_name.$var.delly.merged.bcf"
+
+        # run delly to discover sv
+        printf "\tRe-calling %s variants for sample %s with command:\n" \
+                $var $sample_name >> $workdir/$logdir/$log_file
+        printf "\t\t%s %s \\ \n" $delly_call >> $workdir/$logdir/$log_file
+        $delly_call > tmp.log
+
+        # check return value
+        if [[ $? -ne 0 ]]; then
+            printf "\nERROR: call_sv_delly failed for sample: %s\n" $sample_name
+            echo "stderr: "
+            cat tmp.log; rm tmp.log; exit 1
+        else
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+            merge_arg=${merge_arg}",variants/${sample_name}.$var.delly.bcf"
+            merge_depend=${merge_depend}",afterok:${jobid}"
+            rm tmp.log
+        fi
+    done
+    merge_arg=${merge_arg#*,}
+    merge_depend=${merge_depend#*,}
+
+    # merge re-called var accross samples
+    merge_call="bash $workdir/$scriptdir/merge_sv_delly.sh --var $var --depend $merge_depend"
+    merge_call="${cat_call} --sv_list $merge_arg --check no --name $sample_name"
+    merge_call="${merge_call} --outdir variants --logdir $logdir"
+    merge_call="${merge_call} --delly_arg '-m 500 -b 500 -r 0.5'"
+    printf "\tMerging %s variants with command:\n" \
+           $var >> $workdir/$logdir/$log_file
+    printf "\t\t%s %s \\ \n" $merge_call >> $workdir/$logdir/$log_file
+    $merge_call > tmp.log
+
+    # check return value
+    if [[ $? -ne 0 ]]; then
+        printf "\nERROR: call_sv_delly failed for sample: %s\n" $sample_name
+        echo "stderr: "
+        cat tmp.log; rm tmp.log; exit 1
+    else
+        filter_depend="afterok:${jobid}"
+        rm tmp.log
+    fi
+
+    # filter final call set
+    filter_call="bash $workdir/$scriptdor/filter_sv_delly.sh --vartype $var --depend $filter_depend"
+    filter_call="${filter_call} --bcf $vardir/$sample_name.$var.delly.merged.bcf --check no"
+    filter_call="${filter_call} --outdir $vardir --logdir logs --name $sample_name" 
+
+done

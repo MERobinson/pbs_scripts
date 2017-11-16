@@ -12,21 +12,24 @@ scr_name=$(basename "$0")
 
 # help message
 help_message="
+
 Wrapper to align reads with BWA
 
 usage:
     bash $scr_name [-options] -fq1 <FASTQ>
+purpose:
+    # Align reads in FASTQ format with BWA and generate alignment metrics.
 required arguments:
     -fq1|--fastq1 : FASTQ filename of read 1 
-    -F|--fasta : reference FASTA used in index generation
-    -I|--index : BWA index prefix to align against 
+    --fasta : reference FASTA used in index generation
+    --index : BWA index prefix to align against 
 optional arguments:
     -fq2|--fastq2 : FASTQ filename of read 2 (if paired end)
+    -o|--outdir : output directory for bam files (default = PWD)
+    -q|--qcdir : output directory for qc metrics (default = --outdir)
+    -l|--logdir : output directory for log files (default = --outdir)
     -n|--name : name prefix for output files (default = FASTQ filename)
     -e|--extend : bp extension for generating coverage track (default = 200)
-    -o|--outdir : output directory for bam files (default = PWD)
-    -qd|--qcdir : output directory for qc metrics (default = --outdir)
-    -ld|--logdir : output directory for log files (default = --outdir)
     --check : whether to check input files [yes,no] (default = yes)
     --depend : list of PBS dependencies (default = NULL)
 bam header arguments:
@@ -41,11 +44,10 @@ bam header arguments:
     --pi : predicted median insert size (e.g. 200)
     --pm : platform model - further discription of platform
 additional info:
-    # all paths should be relative to working directory
-    # check and depend options used for job scheduling
-    # log/qc output directories inherit from --outdir unless specified
+    # qc/log output directories inherit from --outdir unless specified
     # any of the bam header arguments provided will be included in the header
     # if platform is ILLUMINA - will automatically extract PU and ID from read name 
+    # check and depend args useful for jobs scheduling
 
 "
 
@@ -57,11 +59,11 @@ while [[ $# -gt 1 ]]; do
             fq1=$2
             shift
             ;;
-        -F|--fasta)
+        --fasta)
             fasta=$2
             shift
             ;;
-        -I|--index)
+        --index)
             index=$2
             shift
             ;;
@@ -73,11 +75,11 @@ while [[ $# -gt 1 ]]; do
             outdir=$2
             shift
             ;;
-        -qd|--qcdir)
-            qcdir=$2
+        -q|--qcdir)
+            logdir=$2
             shift
             ;;
-        -ld|--logdir)
+        -l|--logdir)
             logdir=$2
             shift
             ;;
@@ -94,7 +96,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         --depend)
-            depend="#PBS -W depend=$2"
+            depend=$2
             shift
             ;;
         --sm)
@@ -177,12 +179,16 @@ fi
 if [[ -z "${qcdir:-}" ]]; then
     qcdir=$outdir
 fi
+if [[ -z "${trackdir:-}" ]]; then
+    trackdir=$outdir
+fi
 
 # create output dirs
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir/fastqc
 mkdir -p $workdir/$qcdir/metrics
+mkdir -p $workdir/$trackdir
 
 # set basenames
 fq1_base=$(basename "$fq1")
@@ -195,7 +201,9 @@ if [[ ! -z "${fq2:-}" ]]; then
     fq2_cp="cp $workdir/$fq2 ."
     fq2_base=$(basename "$fq2")
     fq2_fq2sam="FASTQ2=$fq2_base"
-    fq2_bwamem="-p"
+    fq2_bowtie="-1 $fq1_base -2 $fq2_base"
+else
+    fq2_bowtie="$fq1_base"
 fi
 
 # extract filename prefix if not provided
@@ -236,7 +244,8 @@ sam2fq_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar SamToFastq"
                 "CLIPPING_ACTION=2" 
                 "INTERLEAVE=true" 
                 "NON_PF=true")
-align_command=("bwa mem -M -t 20 ${fq2_bwamem:-} $index_base $name.fq > $name.aligned.sam")
+align_command=("bowtie $index_base $fq2_bowtie --sam --best"
+                "--threads 20 > $name.sam")
 merge_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MergeBamAlignment"
                 "R=$fasta_base" 
                 "UNMAPPED_BAM=$name.unaligned.bam" 
@@ -261,36 +270,35 @@ alstat_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmen
             	"O=$name.alignment_summary_metrics")
 
 
-# set log file names
+# set logfile name
 scr_name=${scr_name%.*}
 std_log=$workdir/$logdir/$name.$scr_name.std.log
-pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$workdir/$logdir/$name.$scr_name.out.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 
-# write job script
+# run job
 script=$(cat <<- EOS 
 		#!/bin/bash
-		#PBS -l walltime=10:00:00
+		#PBS -l walltime=30:00:00
 		#PBS -l select=1:mem=40gb:ncpus=20
 		#PBS -j oe
 		#PBS -N $name.bwa
 		#PBS -q med-bio
 		#PBS -o $std_log
-		${depend:-}
 
 		# load modules
 		module load fastqc/0.11.2
 		module load samtools/1.2
 		module load java/jdk-8u66
 		module load picard/2.6.0
-		module load bio-bwa/0.7.10
+		module load bowtie/1.1.1
+        
+		printf "\nSTART: %s\n" date
 
-		echo START: \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
-		
 		# copy resource files to scratch
 		mkdir -p fastqc
 		cp -L $workdir/$index* .
-		cp -L $workdir/$fasta_prefix* .
+		cp -L $workdir/$fasta_base* .
 		cp $workdir/$fq1 .
 		${fq2_cp:-}
 
@@ -334,7 +342,7 @@ script=$(cat <<- EOS
 		samtools index $name.bam
 		cp $name.bam* $workdir/$outdir/
  
-		echo START: \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		printf "\nEND: %s\n" date
 		ls -lhAR
 	EOS
 ) 

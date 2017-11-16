@@ -1,19 +1,20 @@
-#!/user/bin/env bash
+#!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 set -o nounset
 
 # default arg
 workdir=$PWD
-outdir=""
-check="yes"
+outdir=''
+check='yes'
 
 # help message
 help_message="
+
+purpose:
+    Subsample reads from a FASTQ file (or pair of)
 usage:
     bash $(basename "$0") [-options] -f1 <FASTQ1> -s <NUMBER>
-purpose:
-    # quick bash script to subsample from a fastq (or pair of)
 required arguments:
     -f1|--fastq1 : input FASTQ file
     -s|--sub_n : amount of reads to sub (treated as fraction if < 1)
@@ -30,6 +31,7 @@ additional info:
     # example depenency list: 'afterok:123456,afterok:123457'
 output:
     # outputs subsampled FASTQ to --outdir & log file to --logdir
+
 "
 
 # parse arg

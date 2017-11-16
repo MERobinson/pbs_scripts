@@ -1,180 +1,194 @@
-#!/bin/bash
+#!/usr/bin/env bah
+set -o errexit
+set -o pipefail
+set -o nounset
 
 # default arg
 workdir=$PWD
-bamdir=bam
-resdir=resources
-logdir=logs
-qcdir=qc
-fasta=genome.fa
-validate=yes
+outdir=''
+check='yes'
+date=`date '+%Y-%m-%d %H:%M:%S'`
+scr_name=$(basename "$0")
 
 # help message
 help_message="
+Merge BAM files from separate runs and generate metrics for merged alignments.
+
 usage:
-    bash $(basename "$0") [-wrtblgneh] -f <FASTQ>
-purpose:
-    # Merge BAM files from separate runs and generate metrics for merged alignments.
+    bash $scr_name [-options] -b <bam,list>
 required arguments:
-    -i|--bamlist : comma separated list of input BAM files to merge
+    -b|--bam_list : comma separated list of input BAM files to merge
+    -F|--fasta : whole genome FASTA
 optional arguments:
-    -w|--workdir : working directory - used as base dir for all input/output (default = pwd)
-    -b|--bamdir : directory within workdir containing BAM files (default = bam)
-    -r|--resdir : directory within workdir containing resource files (default = resources)
-    -q|--qcdir : output directory for qc metrics (default = qc)
-    -l|--logdir : output directory for log files (default = logs)
-    -n|--name : name prefix for output file (default = FASTQ filename)
-    -d|--depend : comma-sep list of job dependencies - format afterok:<jobid>,afterok:<jobid>
-    -f|--fasta : name of FASTA reference genome file within resdir (default = genome.fa)
-    -v|--validate : whether to check files prior to running job [yes,no] (default = yes)
-example:
-    bash $(basename "$0") -g hg38 -i REH_H3K27ac_run1.bam,REH_H3K27ac_run2.bam
+    -n|--name : name prefix for output files (default = extracted from first bam)
+    -o|--outdir : outut directory (default = PWD)
+    -bd|--bamdir : output directory for merged BAM (default = --outdir)
+    -qd|--qcdir : output directory for qc metrics (default = --outdir)
+    -ld|--logdir : output directory for log files (default = --outdir)
+    --depend : comma-sep list of job dependencies - format afterok:<jobid>,afterok:<jobid>
+    --check : whether to check files prior to running job [yes,no] (default = yes)
 additional_info:
-    # validate option useful for scheduling future jobs when files don't exist yet
+    # all paths should be relative to working directory
+    # check and depend options used for job scheduling
+    # bam/log/qc output directories inherit from --outdir unless specified
 "
 
 # parse command line arg
 while [[ $# -gt 0 ]]; do
     key=$1
     case $key in
-        -i|--bamlist)
-        bam_list=$2
-        shift
-        ;;
-        -w|--workdir)
-        workdir=$2
-        shift
-        ;;
-        -b|--bamdir)
-        bamdir=$2
-        shift
-        ;;
-        -r|--resdir)
-        resdir=$2
-        shift
-        ;;
-        -l|--logdir)
-        logdir=$2
-        shift
-        ;;
-        -q|--qcdir)
-        qcdir=$2
-        shift
-        ;;
+        -b|--bam_list)
+            bam_list=$2
+            shift
+            ;;
+        -F|--fasta)
+            fasta=$2
+            shift
+            ;;
         -n|--name)
-        name=$2
-        shift
-        ;;
-        -f|--fasta)
-        fasta=$2
-        shift
-        ;;
-        -d|--depend)
-        depend_list=$2
-        shift
-        ;;
-        -v|--validate)
-        validate=$2
-        shift
-        ;;
+            name=$2
+            shift
+            ;;
+        -o|--outdir)
+            outdir=$2
+            shift
+            ;;
+        -bd|--bamdir)
+            bamdir=$2
+            shift
+            ;;
+        -ld|--logdir)
+            logdir=$2
+            shift
+            ;;
+        -qd|--qcdir)
+            qcdir=$2
+            shift
+            ;;
+        --depend)
+            depend="#PBS -W depend=$2"
+            shift
+            ;;
+        --check)
+            check=$2
+            shift
+            ;;
         *)
-        echo "Error: Illegal argument"
-        echo "$help_message"
-        exit 1
-        ;;
+            printf "\nERROR: Undefined argument provided: %s %s\n" $1 $2
+            echo "$help_message"; exit 1
+            ;;
     esac
     shift
 done
 
-# check BAM arg provided
-if [[ -z "$bam_list" ]]; then
-    printf "\nERROR: -i|--bamlist argument required\n"
+# check required arg provided
+if [[ -z "${bam_list:-}" ]]; then
+    printf "\nERROR: --bam_list argument required\n"
     echo "$help_message"; exit 1
 else
     IFS="," read -r -a bam_array <<< "$bam_list"
     for bam in ${bam_array[@]}; do
-        bam_mdup_arg="${bam_mdup_arg}I=$bam "
-        bam_cp_arg="${bam_cp_arg}cp -t . $workdir/$bamdir/$bam*; "
-    done
-fi
-
-# validate files
-if [[ "$validate" = yes ]]; then
-    # check indir exists
-    if [[ ! -d "$workdir/$bamdir" ]]; then
-        printf "\nERROR: input directory does not exist: %s/%s/%s\n" $workdir $bamdir
-        echo "$help_message"; exit 1
-    fi
-
-    # check resource files
-    if [[ ! -f "$workdir/$resdir/$fasta" ]]; then
-        printf "\nERROR: FASTA file not found: %s/%s/%s\n" $workdir $resdir $fasta
-    else
-        fasta_base=${fasta%%.*}
-    fi
-
-    # check BAM files exist
-    for bam in ${bam_array[@]}; do
-        if [[ ! -f "$workdir/$bamdir/$bam" ]]; then
-            printf "\nERROR: input BAM file does not exist: %s/%s/%s\n" $workdir $bamdir $bam
+        if [[ $check = "yes" ]] && [[ -z $workdir/$bam ]]; then
+            printf "\nERROR: BAM file not readable: %s/%s\n" $workdir $bam
             echo "$help_message"; exit 1
+        else
+            bam_base=$(basename "$bam")
+            bam_mdup_arg="${bam_mdup_arg:-}I=$bam_base "
+            bam_cp_arg="${bam_cp_arg:-}cp $workdir/$bam* .; "
         fi
     done
+fi
+if [[ -z ${fasta:-} ]]; then
+    printf "\nERROR: --fasta argument required\n"
+    echo "$help_message"; exit 1
+else
+    if [[ $check = 'yes' ]] && [[ ! -r $workdir/$fasta ]]; then 
+        printf "\nERROR: BAM file not readable: %s/%s\n" $workdir $bam
+        echo "$help_message"; exit 1
+    else
+        fasta_prefix=${fasta%%.*}
+        fasta_base=$(basename "$fasta")
+    fi
 fi
 
 # if no name provided extract from first bam
 if [[ -z "$name" ]]; then
-    name=${bam_array[0]%%.*}
+    name=${bam_array[0]%%.*}".merged"
 fi
 
-# set dependency argument
-if [[ ! -z $depend_list ]]; then
-    depend="#PBS -W depend=$depend_list"
+# set output directories
+if [[ -z ${logdir:-} ]]; then
+    logdir=$outdir
+fi
+if [[ -z "${qcdir:-}" ]]; then
+    qcdir=$outdir
+fi
+if [[ -z "${bamdir:-}" ]]; then
+    bamdir=$outdir
 fi
 
 # create required dirs
 mkdir -p $workdir/$logdir
-mkdir -p $workdir/$qcdir/metrics
+mkdir -p $workdir/$qcdir
+mkdir -p $workdir/$bamdir
 
-# run job
-jobid=$(cat <<- EOS | qsub -N $name.merge - 
-	#!/bin/bash
-	#PBS -l walltime=10:00:00
-	#PBS -l select=1:mem=30gb:ncpus=8
-	#PBS -j oe
-	#PBS -q med-bio
-	#PBS -o $workdir/$logdir/$name.merge_bam_picard.log
-	$depend
+# set commands
+mdup_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
+                "$bam_mdup_arg O=$name.bam M=$name.mark_duplicate_metrics CREATE_INDEX=true")
+casm_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
+                "R=$fasta_base I=$name.bam O=$name.alignment_summary_metrics")
 
-	# load modules
-	module load samtools/1.2
-	module load java/jdk-8u66
-	module load picard/2.6.0
+# set log file names
+scr_name=${scr_name%.*}
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$workdir/$logdir/$name.$scr_name.out.log
 
-	# copy accross bam and fasta
-	cp $workdir/$resdir/$fasta_base* .
-	$bam_cp_arg
+# write job script
+script=$(cat <<- EOS 
+		#!/bin/bash
+		#PBS -l walltime=10:00:00
+		#PBS -l select=1:mem=18gb:ncpus=8
+		#PBS -j oe
+		#PBS -N $name.merge
+		#PBS -q med-bio
+		#PBS -o $std_log
+		${depend:-}
 
-	# merge/mark dup
-	java -Xmx28G -jar /apps/picard/2.6.0/picard.jar MarkDuplicates \
-		$bam_mdup_arg \
-		O=$name.bam \
-		M=$name.mark_duplicate_metrics \
-		CREATE_INDEX=true
-	cp $name.mark_duplicate_metrics $workdir/$qcdir/metrics/
+		echo START: \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
-	# alignment metrics
-	java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics \
-		R=$fasta \
-		I=$name.bam \
-		O=$name.alignment_summary_metrics
-	cp $name.alignment_summary_metrics $workdir/$qcdir/metrics/
+		# load modules
+		module load samtools/1.2
+		module load java/jdk-8u66
+		module load picard/2.6.0
 
-	# copy final bam to outdir
-	samtools index $name.bam
-	cp $name.bam* $workdir/$bamdir/
+		# copy accross bam and fasta
+		cp $workdir/$fasta_prefix* .
+		$bam_cp_arg
 
-	ls -lhAR
+		# merge & mark dup
+		printf "\nMerging BAM and re-marking duplicates\n" &>> $out_log 
+		${mdup_command[@]} &>> $out_log
+		cp $name.mark_duplicate_metrics $workdir/$qcdir/
+
+		# alignment metrics
+		printf "\nCollecting alignment metrics\n" >> $out_log
+		${casm_command[@]} &>> $out_log
+		cp $name.alignment_summary_metrics $workdir/$qcdir/
+
+		# copy final bam to outdir
+		samtools index $name.bam &> $out_log
+		cp $name.bam* $workdir/$bamdir/
+
+		echo END: \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhAR
 	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
 echo "JOBID: $jobid"
+exit 0

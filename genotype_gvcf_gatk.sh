@@ -155,7 +155,7 @@ fi
 # run pbs script
 jobid=$(cat <<- EOS | qsub -N $name.ggvcf -
 		#!/usr/bin/env bash
-		#PBS -l walltime=10:00:00
+		#PBS -l walltime=40:00:00
 		#PBS -l select=1:mem=40gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio

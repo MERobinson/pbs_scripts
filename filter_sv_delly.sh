@@ -11,27 +11,27 @@ check='yes'
 # help message
 help_message="
 
-Wrapper to call structural variants with Delly2
-
 usage:
-    bash $(basename "$0") [-options] -t <BAM> -v <VAR>
+    bash $(basename "$0") [-options] -b <BCF> -v <VAR>
+purpose:
+    Wrapper to filter structural variants with Delly2
 required arguments:
-    -b|--bam : comma separated list of bam files [BAM]
-    -v|--vartype : variant type to analyse [INS,DEL,INV,BND,DUP]
-    -F|--fasta : whole genome fasta [FASTA]
+    -b|--bcf : structural variants file [BCF]
+    -v|--vartype : variant type [INS,DEL,INV,BND,DUP]
 optional arguments:
+    -s|--sample_info : sample info file for somatic variants [tsv] (default = NULL)
     -o|--outdir : output directory [string] (default = '.')
-    -l|--logdir : output directory for log files [string] (default = --outdir)
-    -E|--exclude : regions to exclude (default = NULL) 
+    -l|--logdir : output directory for log files [string] (default = --outdir) 
     -n|--name : prefix for output files [string] (deafult = extracted from bam)
-    --vcf : VCF file for re-genotyping [string] (default = NULL)
     --delly_arg : any additional arg to pass to delly [string] (default = NULL)
     --check : whether to check input files [yes|no] (default = 'yes')
     --depend : list pf PBS dependencies [string] (default = NULL)
 additional info:
     # all paths should be relative to working directory
     # check and depend arguments are used for job scheduling/pipelines
-    # exclusion regions should be provided as ...
+    # filtering is run in germline mode unless --sample_info argument is provided
+    # sample info file should be a tab separated text file with sample ID in
+      first column and either 'tumor' or 'control' in second column.
     # --delly_arg should be provided as quoted list of arguments,
       and are passed as-is to delly. e.g. --delly_arg '-q 20 --noindels'
     # see Delly2 man for additional info: https://github.com/dellytools/delly
@@ -42,8 +42,16 @@ additional info:
 while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
-        -b|--bam)
-            bam_list=$2
+        -b|--bcf)
+            bcf=$2
+            shift
+            ;;
+        -v|--vartype)
+            vartype=$2
+            shift
+            ;; 
+        -s|--sample_info)
+            sample_info=$2
             shift
             ;;
         -o|--outdir)
@@ -54,24 +62,8 @@ while [[ $# -gt 1 ]]; do
             logdir=$2
             shift
             ;;
-        -F|--fasta)
-            fasta=$2
-            shift
-            ;;
-        -E|--exclude)
-            exclude=$2
-            shift
-            ;;
         -n|--name)
             name=$2
-            shift
-            ;;
-        -v|--vartype)
-            vartype=$2
-            shift
-            ;;
-        --vcf)
-            vcf=$2
             shift
             ;;
         --delly_arg)
@@ -100,33 +92,22 @@ if [[ -z ${logdir:-} ]]; then
 fi
 
 # check required arg
-if [[ -z "${bam_list:-}" ]]; then
-    printf "\nERROR: No --bam argument provided\n"
+if [[ -z "${bcf:-}" ]]; then
+    printf "\nERROR: No --bcf argument provided\n"
     echo "$help_message"; exit 1
 elif [[ -z "${vartype:-}" ]]; then
     printf "\nERROR: No --vartype argument provided\n"
     echo "$help_message"; exit 1
-elif [[ -z "${fasta:-}" ]]; then
-    printf "\nERROR: No --fasta argument provided\n"
-    echo "$help_message"; exit 1  
 fi
-
-# split bam list
-IFS="," read -r -a bam_array <<< "$bam_list"
 
 # check files unless flagged
 if [[ $check = yes ]]; then
-    for bam in ${bam_array[@]}; do
-        if [[ ! -r $workdir/$bam ]]; then
-            printf "\nERROR: BAM file is not readable: %s/%s\n" $workdir $bam
-            echo "$help_message"; exit 1
-        fi
-    done
-    if [[ ! -r $workdir/$fasta ]]; then
-        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
+    if [[ ! -r $workdir/$bcf ]]; then
+        printf "\nERROR: BCF file is not readable: %s/%s\n" $workdir $bcf
         echo "$help_message"; exit 1
     fi
 fi
+
 
 # check variant type 
 vartype_list="INS DEL INV BND DUP"
@@ -137,35 +118,23 @@ fi
 
 # get sample name if not provided
 if [[ -z ${name:-} ]]; then
-    name=$(basename ${bam_array[0]})
+    name=$(basename "$bcf")
     name=${name%%.*}
 fi
 
-# set arguments for bam files
-for bam in ${bam_array[@]}; do
-    bam_cp="${bam_cp:-}; cp -rL $workdir/$bam* ."
-    bam_base=$(basename "$bam")
-    bam_arg="${bam_arg:-} $bam_base"
-done
-bam_cp=${bam_cp#*; }
-bam_arg=${bam_arg#* }
+# get basenames/prefixes
+bcf_base=$(basename "$bcf")
 
-# get basename/prefix of fasta
-fasta_base=$(basename "$fasta")
-fasta_prefix=${fasta%%.*}
-
-# set exclusion call arguments if provided
-if [[ ! -z ${exclude:-} ]]; then
-	excl_cp="cp -rL $workdir/$exclude ."
-    excl_base=$(basename "$exclude")
-    excl_arg="-x $excl_base"
-fi
-
-# set vcf args if provided
-if [[ ! -z ${vcf:-} ]]; then
-    vcf_cp="cp $workdir/$vcf* ."
-    vcf_base=$(basename "$vcf")
-    vcf_arg="-v $vcf_base"
+# if control provided setup somatic filtering args
+if [[ ! -z ${sample_info:-} ]]; then
+    echo "Filtering in somatic mode"
+    filter_type="somatic"
+    si_cp="cp $workdir/$sample_info ."
+    sample_info=$(basename "$sample_info")
+    si_arg="-s $sample_info"
+else
+    echo "Filtering in germline mode"
+    filter_type="germline"
 fi
 
 # create output dirs
@@ -173,13 +142,13 @@ mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
 # run job 
-jobid=$(cat <<- EOS | qsub -N $name.call_sv_delly -
+jobid=$(cat <<- EOS | qsub -N $name.filter_sv_delly -
 		#!/bin/bash
-		#PBS -l walltime=60:00:00
-		#PBS -l select=1:mem=40gb:ncpus=1
+		#PBS -l walltime=20:00:00
+		#PBS -l select=1:mem=20gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.call_sv_delly.log
+		#PBS -o $workdir/$logdir/$name.filter_sv_delly.log
 		${depend:-}
 
 		# load required modules
@@ -188,19 +157,14 @@ jobid=$(cat <<- EOS | qsub -N $name.call_sv_delly -
 		source activate delly
 
 		# copy required inputs to scratch
-		cp -rL $workdir/$fasta_prefix* .
-		${excl_cp:-}
-		${vcf_cp:-}
-		${bam_cp:-}
+		cp $workdir/$bcf* .
+		${si_cp:-}
 
-		# run delly for each variant type
-		delly call -t $vartype \
-			-g $fasta_base \
+		# run delly
+		delly filter -t $vartype \
+			-f $filter_type \
 			-o $name.bcf \
-			${excl_arg:-} \
-			${vcf_arg:-} \
-			${delly_arg:-} \
-			$bam_arg
+			${si_arg:-} $bcf_base 
 
 		cp $name.bcf* $workdir/$outdir/
 		

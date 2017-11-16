@@ -18,7 +18,7 @@ for bcf in $workdir/variants/*.merged.delly.bcf; do
     # run script
     jobid=$(cat <<- EOS | qsub -N $name.sv_filter - 
 	#!/bin/bash
-    	#PBS -l walltime=05:00:00
+   	#PBS -l walltime=05:00:00
 	#PBS -l select=1:mem=30gb:ncpus=1
 	#PBS -j oe
 	#PBS -q med-bio

@@ -95,7 +95,7 @@ fi
 
 # get sample name if not provided
 if [[ -z ${name:-} ]]; then
-	name="combined.vcf"
+    name="combined"
 fi
 
 # get basename/prefix for fasta
@@ -135,9 +135,9 @@ jobid=$(cat <<- EOS | qsub -N $name.cat -
 			org.broadinstitute.gatk.tools.CatVariants \
 			-R $fasta_base \
 			$v_arg \
-			-out $name.hc.g.vcf
+			-out $name.vcf
 
-		cp $name* $workdir/$outdir/variants/
+		cp $name.vcf* $workdir/$outdir/
 		
 		printf "DATE: %s\n" $(date "+%Y-%m-%d")
 		printf "JOBID: %s\n" '${PBS_JOBID:-}'

@@ -1,4 +1,4 @@
-#!/user/bin/env bash
+#!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 set -o nounset
@@ -170,7 +170,7 @@ fi
 # call variants
 jobid=$(cat <<- EOS | qsub -N $name.var -
 		#!/usr/bin/env bash
-		#PBS -l walltime=20:00:00
+		#PBS -l walltime=10:00:00
 		#PBS -l select=1:mem=40gb:ncpus=1
 		#PBS -j oe
 		#PBS -q med-bio
@@ -195,6 +195,7 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 			-R $fasta \
 			-I $bam_base \
 			-o $name.hc.$vcf_ext \
+			${chr_arg:-} \
 			${gvcf_arg:-} \
 			${intervals_arg:-} \
 			${dbsnp_arg:-}
