@@ -7,21 +7,22 @@ set -o nounset
 workdir=$PWD
 outdir=''
 check='yes'
+date=`date '+%Y-%m-%d %H:%M:%S'`
+scr_name=$(basename "$0")
 
 # help message
 help_message="
-
 Wrapper to call structural variants with Delly2
 
 usage:
-    bash $(basename "$0") [-options] -t <BAM> -v <VAR>
+    bash $scr_name [-options] -b <bam> -v <vartype>
 required arguments:
     -b|--bam : comma separated list of bam files [BAM]
     -v|--vartype : variant type to analyse [INS,DEL,INV,BND,DUP]
     -F|--fasta : whole genome fasta [FASTA]
 optional arguments:
     -o|--outdir : output directory [string] (default = '.')
-    -l|--logdir : output directory for log files [string] (default = --outdir)
+    -ld|--logdir : output directory for log files [string] (default = --outdir)
     -E|--exclude : regions to exclude (default = NULL) 
     -n|--name : prefix for output files [string] (deafult = extracted from bam)
     --vcf : VCF file for re-genotyping [string] (default = NULL)
@@ -50,7 +51,7 @@ while [[ $# -gt 1 ]]; do
             outdir=$2
             shift
             ;;
-        -l|--logdir)
+        -ld|--logdir)
             logdir=$2
             shift
             ;;
@@ -172,14 +173,25 @@ fi
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
-# run job 
-jobid=$(cat <<- EOS | qsub -N $name.call_sv_delly -
+# set commands
+call_command=("delly call -t $vartype -g $fasta_base -o $name.bcf ${excl_arg:-}"
+              "${vcf_arg:-} ${delly_arg:-} $bam_arg")
+
+# set log file names
+scr_name=${scr_name%.*}
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
+# write job script
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=60:00:00
-		#PBS -l select=1:mem=40gb:ncpus=1
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:mem=46gb:ncpus=1
 		#PBS -j oe
+		#PBS -N $name.delly
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.call_sv_delly.log
+		#PBS -o $std_log
 		${depend:-}
 
 		# load required modules
@@ -187,24 +199,29 @@ jobid=$(cat <<- EOS | qsub -N $name.call_sv_delly -
 		module load anaconda3/personal
 		source activate delly
 
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+
 		# copy required inputs to scratch
 		cp -rL $workdir/$fasta_prefix* .
-		${excl_cp:-}
-		${vcf_cp:-}
-		${bam_cp:-}
+		${excl_cp:-} &>> $out_log
+		${vcf_cp:-} &>> $out_log
+		${bam_cp:-} &>> $out_log
 
-		# run delly for each variant type
-		delly call -t $vartype \
-			-g $fasta_base \
-			-o $name.bcf \
-			${excl_arg:-} \
-			${vcf_arg:-} \
-			${delly_arg:-} \
-			$bam_arg
+		# run delly calling
+		${call_command[@]} &>> $out_log
 
-		cp $name.bcf* $workdir/$outdir/
-		
-		ls -lhRA
+		cp $name.bcf* $workdir/$outdir/ &>> $out_log
+
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhRA >> $out_log
+		cp $out_log $workdir/$logdir
 		EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
 echo "JOBID: $jobid"
+exit 0

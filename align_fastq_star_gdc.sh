@@ -6,29 +6,24 @@ set -o nounset
 # default arg
 workdir=$PWD
 outdir=''
-check='on'
-chimeric='off'
-twopass='off'
+check='yes'
 
 # help message
 help_message="
-Wrapper to align reads with STAR and produce BAM & counts.
+Wrapper to align reads with STAR following the GDC/ICGC settings.
 
 usage:
-    bash $(basename "$0") [-options] -f1 <FASTQ1> -I <INDEX>
+    bash $(basename "$0") [-options] -f1 <FASTQ1> -F <FASTA> -I <INDEX>
 required arguments:
     -fq1|--fastq1 : input FASTQ file
     -I|--index : STAR index directory
+    -F|--fasta : GTF file of transcripts
 optional arguments:
     -fq2|--fastq2 : mate FASTQ file if PE [FASTQ] (default = NULL)
     -n|--name : prefix for output files [string] (default = extracted from fastq)
     -o|--outdir : output directory [string] (default = '.')
     -l|--logdir : output dir for log files [string] (default = --outdir)
-    --chimeric : whether to detect chimeric reads [on|off] (default = 'off')
-    --twopass : whether to run in 2pass mode [on|off] (default = 'off')
-    --sjdb : comma sep list of SJ.out.tab files to pass to STARs
-             --sjdbFileChrStartEnd argument (default = NULL)
-    --check : whether to check input files [on|off] (default = 'on')
+    --check : whether to check input files [yes|no] (default = 'yes')
     --depend : list of PBS dependencies [string] (default = NULL)
 additional info:
     # all paths should be relative to working directory
@@ -53,6 +48,10 @@ while [[ $# -gt 1 ]]; do
             index=$2
             shift
             ;;
+        -F|--fasta)
+            fasta=$2
+            shift
+            ;;
         -n|--name)
             name=$2
             shift
@@ -63,18 +62,6 @@ while [[ $# -gt 1 ]]; do
             ;;
         -l|--logdir)
             logdir=$2
-            shift
-            ;;
-        --chimeric)
-            chimeric=$2
-            shift
-            ;;
-        --twopass)
-            twopass=$2
-            shift
-            ;;
-        --sjdb)
-            sjdb=$2
             shift
             ;;
         --check)
@@ -105,7 +92,10 @@ if [[ -z ${fq1:-} ]]; then
 elif [[ -z ${index:-} ]]; then
     printf "\nERROR: no --index argument provided\n"
     echo "$help_message"; exit 1
-fi
+elif [[ -z ${fasta:-} ]]; then
+    printf "\nERROR: no --fasta argument provided\n"
+    echo "$help_message"; exit 1
+fi    
 
 # get sample name if not provided
 if [[ -z ${name:-} ]]; then
@@ -119,15 +109,14 @@ if [[ $fq_ext = "gz" ]]; then
     compress_arg="--readFilesCommand zcat"
     fq_ext="fastq.gz"
 else
+    compress_arg="--readFilesCommand zcat"
     fq_ext="fastq"
 fi
 
 # check if multiple fastq per read
 IFS=',' read -r -a fq1_array <<< $fq1
-if [[ ${#fq1_array[@]} -gt 1 ]]; then
-    echo "Merging input R1 fastq"
-    check='off'
-    fq1_merge="cat ${fq1_array[@]##*/} > $name.R1_merge.$fq_ext"
+if [[ ${#fq1_array[@]} > 1 ]]; then
+    fq1_merge="cat ${fq1_array[@]} > $name.R1_merge.$fq_ext"
     fq1_cp=$(printf "cp $workdir/%s .;" ${fq1_array[@]})
     fq1=$name.R1_merge.$fq_ext
 else
@@ -136,9 +125,8 @@ fi
 if [[ -n ${fq2:-} ]]; then
     echo "Mate input - running in PE mode"
     IFS=',' read -r -a fq2_array <<< $fq2
-    if [[ ${#fq2_array[@]} -gt 1 ]]; then
-        echo "Merging input R2 fastq"
-        fq2_merge="cat ${fq2_array[@]##*/} > $name.R2_merge.$fq_ext"
+    if [[ ${#fq2_array} > 1 ]]; then
+        fq2_merge="cat ${fq2_array[@]} > $name.R2_merge.$fq_ext"
         fq2_cp=$(printf "cp $workdir/%s .;" ${fq2_array[@]})
         fq2=$name.R2_merge.$fq_ext
     else
@@ -149,64 +137,80 @@ else
 fi
 
 # check files unless flagged
-if [[ $check = 'on' ]]; then
-    if [[ ! -r $workdir/$fq1 ]]; then
-        printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq1
-        echo "$help_message"; exit 1
-    elif [[ ! -z ${fq2:-} ]] & [[ ! -r $workdir/${fq2:-} ]]; then
-        printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq2
-        echo "$help_message"; exit 1
-    elif [[ ! -r $workdir/$index ]]; then
+if [[ $check = yes ]]; then
+    for idx in  "${!fq1_array[@]}"; do
+        if [[ ! -r $workdir/${fq1_array[$idx]} ]]; then
+            printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir ${fq1_array[$idx]}
+            echo "$help_message"; exit 1
+        elif [[ ! -z ${fq2:-} ]] & [[ ! -r $workdir/${fq2_array[$idx]} ]]; then
+            printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir ${fq2_array[$idx]}
+            echo "$help_message"; exit 1
+        fi
+    done
+    if [[ ! -r $workdir/$index ]]; then
         printf "\nERROR: Index folder is not readable: %s/%s\n" $workdir $index
         echo "$help_message"; exit 1
+    elif [[ ! -r $workdir/$gtf ]]; then
+        printf "\nERROR: GTF file is not readable: %s/%s\n" $workdir $gtf
+        echo "$help_message"; exit 1
     fi
-fi
-
-# check optional flags
-if [[ $chimeric = 'on' ]]; then
-    chimeric_arg="--chimSegmentMin 15"
-fi
-if [[ $twopass = 'on' ]]; then
-    twopass_arg="--twopassMode Basic"
-fi
-if [[ -n ${sjdb:-} ]]; then
-    IFS=',' read -r -a sjdb_array <<< "$sjdb"
-    sjdb_arg="--sjdbFileChrStartEnd ${sjdb_array[@]##*/}"
-    sjdb_cp=$(printf "cp $workdir/%s .;" ${sjdb_array[@]})
 fi
 
 # get basenames/prefix
 fq1_base=$(basename "$fq1")
 if [[ -n ${fq2:-} ]]; then fq2_base=$(basename "$fq2"); fi
 index_base=$(basename "$index")
+fasta_base=$(basename "$fasta")
 
 # setup output dir
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
 # set commands
-star_command=("STAR --runMode alignReads"
+star_first_pass=("STAR --runMode alignReads"
                 "--runThreadN 20"
                 "--genomeDir ${index_base}"
                 "--readFilesIn ${fq1_base} ${fq2_base:-}"
-                "--outFilterType BySJout"
+                "--outFilterMultimapScoreRange 1"
                 "--outFilterMultimapNmax 20"
-                "--alignSJoverhangMin 8"
-                "--alignSJDBoverhangMin 1"
-                "--outFilterMismatchNoverLmax 0.04"
-                "--alignIntronMin 20"
-                "--alignIntronMax 1000000"
+                "--outFilterMismatchNmax 10"
+                "--alignIntronMax 500000"
                 "--alignMatesGapMax 1000000"
-                "--outSAMstrandField intonMotif"
-                "--quantMode TranscriptomeSAM GeneCounts"
-                "--readNameSeparator _"
-                "--outFileNamePrefix ${name}.star."
-                "--outBAMsortingThreadN 20"
-                "--outSAMtype BAM SortedByCoordinate"
-                "${compress_arg:-}"
-                "${chimeric_arg:-}"
-                "${twopass_arg:-}"
-                "${sjdb_arg:-}")
+                "--sjdbScore 2"
+                "--alignSJDBoverhangMin 1"
+                "--outFilterMatchNminOverLread 0.33"
+                "--outFilterScoreMinOverLread 0.33"
+                "--sjdbOverhang 100"
+                "--outSAMstrandField intronMotif"
+                "--outSAMtype None"
+                "--outSAMmode None"
+                "${compress_arg:-}")
+index_generation=("STAR --runMode genomeGenerate"
+                  "--genomeDir first_pass"
+                  "--genomeFastaFiles ${fasta_base}"
+                  "--sjdbOverhang 100"
+                  "--runThreadN 20"
+                  "--sjdbFileChrStartEnd SJ.out.tab")
+star_second_pass=("STAR --runMode alignReads"
+                  "--genomeDir first_pass"
+                  "--readFilesIn ${fq1_base} ${fq2_base:-}"
+                  "--runThreadN 20"
+                  "--outFilterMultimapScoreRange 1"
+                  "--outFilterMultimapNmax 20"
+                  "--outFilterMismatchNmax 10"
+                  "--alignIntronMax 500000"
+                  "--alignMatesGapMax 1000000"
+                  "--sjdbScore 2"
+                  "--alignSJDBoverhangMin 1"
+                  "--outFilterMatchNminOverLread 0.33"
+                  "--outFilterScoreMinOverLread 0.33"
+                  "--sjdbOverhang 100"
+                  "--outSAMstrandField intronMotif"
+                  "--outSAMattributes NH HI NM MD AS XS"
+                  "--outSAMunmapped Within"
+                  "--outSAMtype BAM SortedByCoordinate"
+                  "--outFileNamePrefix ${name}.star."
+                  "${compress_arg:-}")
 
 # set log file names
 scr_name=$(basename "$0" .sh)
@@ -235,17 +239,20 @@ script=$(cat <<- EOS
 		
 		# copy files to scratch
 		cp -rL $workdir/$index . &>> $out_log
+		cp -rL $workdir/$fasta . &>> $out_log
 		${fq1_cp:-} &>> $out_log
 		${fq2_cp:-} &>> $out_log
-		${sjdb_cp:-} &>> $out_log
 
 		# merge fastq if multiple
-		${fq1_merge:-} 
+		${fq1_merge:-}
 		${fq2_merge:-}
 
 		# run STAR
-		${star_command[@]} &>> $out_log
-		
+		mkdir first_pass
+		${star_first_pass[@]} &>> $out_log
+		${index_generation[@]} &>> $out_log
+		${star_second_pass[@]} &>> $out_log		
+
 		# index bam
 		mv ${name}.star.Aligned.sortedByCoord.out.bam $name.star.bam 
 		samtools index ${name}.star.bam

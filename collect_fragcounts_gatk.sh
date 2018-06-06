@@ -9,20 +9,22 @@ outdir=""
 check="yes"
 date=`date '+%Y-%m-%d %H:%M:%S'`
 scr_name=$(basename "$0")
+merge_rule="OVERLAPPING_ONLY"
 
 # help message
 help_message="
-Wrapper to GATK v3 CatVariants - to concatenate VCFs.
+Wrapper to GATK4 CollectFragmentCounts - counts fragment centres per interval.
 
 usage:
-    bash $scr_name [-options] -v <list,of,VCF> -F <FASTA>
+    bash $scr_name [-options] -F <FASTA> -i <intervals>
 required arguments:
-    -v|--vcf_list : comma separated list of VCF files to cat
-    -F|--fasta : whole genome FASTA file
+    -i|--intervals : interval list to process
+    -b|--bam : input bam file 
 optional arguments:
-    -o|--outdir : output directory for concatenated VCF (default = PWD)
+    -m|--merge_rule : interval merging rule [see gatk doc] (default = OVERLAPPING_ONLY)
+    -o|--outdir : output directory for processed intervals (default = PWD)
     -ld|--logdir : output directory for log files (default = --outdir)
-    -n|--name : name of output file [string] (default = extracted from first VCF)
+    -n|--name : name of output file [string] (default = extracted from input file)
     --check : whether to check input files [yes,no] (default = 'yes')
     --depend : dependency list to pass to PBS script (default = NULL)
 additional info:
@@ -36,12 +38,16 @@ additional info:
 while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
-        -v|--vcf_list)
-            vcf_list=$2
+        -i|--intervals)
+            intervals=$2
             shift
             ;;
-        -F|--fasta)
-            fasta=$2
+        -b|--bam)
+            bam=$2
+            shift
+            ;;
+        -m|--merge_rule)
+            merge_rule=$2
             shift
             ;;
         -o|--outdir)
@@ -78,52 +84,46 @@ if [[ -z ${logdir:-} ]]; then
 fi
 
 # check required arg
-if [[ -z ${vcf_list:-} ]]; then
-	printf "\nERROR: no vcf argument provided\n"
-	echo "$help_message"; exit 2
-else
-    IFS="," read -r -a vcf_array <<< "$vcf_list"
-fi
-if [[ -z ${fasta:-} ]]; then
-    printf "\nERROR: no fasta argument provided\n"
-    echo "$help_message"; exit 2
+if [[ -z ${intervals:-} ]]; then
+	printf "\nERROR: --intervals argument is required\n"
+	echo "$help_message"; exit 1
+elif [[ -z ${bam:-} ]]; then
+    printf "\nERROR: --bam argument is required\n"
+    echo "$help_message"; exit 1
 fi
 
 # check files unless flagged
 if [[ $check = yes ]]; then
-    for vcf in ${vcf_array[@]}; do
-        if [[ -z $workdir/${vcf} ]]; then
-            printf "\nERROR: VCF file is not readable: $workdir/$vcf\n"
-            echo "$help_message"; exit 2
-        fi
-    done
-    if [[ ! -r $workdir/$fasta ]]; then
-        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
-        echo "$help_message"; exit 2
+    if [[ ! -r $workdir/$intervals ]]; then
+        printf "\nERROR: Intervals file is not readable: %s/%s\n" $workdir $intervals
+        echo "$help_message"; exit 1
+    elif [[ ! -r $workdir/$bam ]]; then
+        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $bam
+        echo "$help_message"; exit 1
     fi
 fi
 
 # get sample name if not provided
 if [[ -z ${name:-} ]]; then
-    name="${vcf_array[0]%%.*}.cat"
+    name=$(basename $bam)
+    name="${name%%.*}.fragcounts"
 fi
 
-# get basename/prefix for fasta
-fasta_base=$(basename "$fasta")
-fasta_prefix=${fasta%%.*}
-
-# set arg for VCF list copying and command input
-cp_arg=$(printf "cp $workdir/%s* . ;" ${vcf_array[@]})
-v_arg=$(printf -- "-V %s " ${vcf_array[@]##*/})
+# get basename/prefix
+bam_base=$(basename "$bam")
+intervals_base=$(basename "$intervals")
 
 # setup output directories
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$outdir
 
 # set commands
-cat_command=("java -cp /apps/gatk/3.6/GenomeAnalysisTK.jar"
-             "org.broadinstitute.gatk.tools.CatVariants"
-             "-R $fasta_base $v_arg -out $name.vcf")
+fragc_command=("gatk CollectFragmentCounts"
+                "--java-options -Xmx16G"
+                "-I $bam_base"
+                "-L $intervals_base"
+                "-O $name.hdf5"
+                "--interval-merging-rule $merge_rule")
 
 # set log file names
 scr_name=${scr_name%.*}
@@ -131,33 +131,33 @@ std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$name.$scr_name.out.log
 
-# cat variants
+# write script
 script=$(cat <<- EOS
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=18gb:ncpus=1
+		#PBS -l select=1:mem=16gb:ncpus=1
 		#PBS -j oe
-		#PBS -N $name.cat
+		#PBS -N $name.fragc
 		#PBS -q med-bio
 		#PBS -o $std_log
-		${depend:-}		
+		${depend:-}
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# load modules
-		module load picard/2.6.0
-		module load gatk/3.6
+		module load gatk/4.0
 		module load java/jdk-8u66
 		module load samtools/1.2
 
 		# copy files to scratch
-		$cp_arg &>> $out_log
-		cp -rL $workdir/$fasta_prefix* . &>> $out_log
+		cp -rL $workdir/$intervals* . &>> $out_log
+		cp -rL $workdir/$bam* . &>> $out_log
 
-		# call
-		${cat_command[@]} &>> $out_log
+		# preprocess
+		${fragc_command[@]} &>> $out_log
 
-		cp $name.vcf* $workdir/$outdir/  &>> $out_log
+		# copy output file to outdir 
+		cp $name.hdf5* $workdir/$outdir/ &>> $out_log
 		
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		printf "JOBID: %s\n" \${PBS_JOBID:-} >> $out_log

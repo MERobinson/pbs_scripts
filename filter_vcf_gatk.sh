@@ -17,6 +17,7 @@ purpose:
     Wrapper to filter VCF files with GATK v4.0 SelectVariants
 required arguments:
     -v|--vcf : VCF file to filter [VCF]
+    -F|--fasta : whole genome fasta [FASTA]
 optional arguments:
     -o|--outdir : output directory [string] (default = '.')
     -l|--logdir : output directory for log files [string] (default = --outdir) 
@@ -35,6 +36,10 @@ while [[ $# -gt 1 ]]; do
     case $key in
         -v|--vcf)
             vcf=$2
+            shift
+            ;;
+        -F|--fasta)
+            fasta=$2
             shift
             ;;
         -o|--outdir)
@@ -74,12 +79,18 @@ fi
 if [[ -z "${vcf:-}" ]]; then
     printf "\nERROR: No --vcf argument provided\n"
     echo "$help_message"; exit 1
+elif [[ -z "${fasta:-}" ]]; then
+    printf "\nERROR: No --fasta argument provided\n"
+    echo "$help_message"; exit 1
 fi
 
 # check files unless flagged
 if [[ $check = yes ]]; then
     if [[ ! -r $workdir/$vcf ]]; then
         printf "\nERROR: VCF file is not readable: %s/%s\n" $workdir $vcf
+        echo "$help_message"; exit 1
+    elif [[ ! -r $workdir/$fasta ]]; then
+        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
         echo "$help_message"; exit 1
     fi
 fi
@@ -121,15 +132,21 @@ jobid=$(cat <<- EOS | qsub -N $name.filter_vcf_gatk -
 		java -Xmx32G -jar /apps/gatk/3.6/GenomeAnalysisTK.jar \
 			-T VariantFiltration \
 			-R $fasta_base \
-			-o $name.vcf \
+			-o $name.filt.vcf \
 			--variant $vcf_base \
-			--filterExpression "QSS / AD > 20" \
-			--filterName "average QSS < 20" \
-			--filterExpression "! vc.getGenotype(\"${name}\").isHomRef()" \
-			--filterName "is hom ref" 
+			--filterExpression "DB" \
+			--filterName "commonSNP" \
+			--filterExpression "QD < 2.0" \
+			--filterName "lowQD" \
+			--filterExpression "FS > 200.0" \
+			--filterName "highFS" \
+			--filterExpression "QUAL < 100.0" \
+			--filterName "lowQual" \
+			--filterExpression "vc.getGenotype(\"${name}\").isHomRef()" \
+			--filterName "ishomref" 
 
-		cp $name.vcf* $workdir/$outdir/
-		
+		cp $name.filt.vcf* $workdir/$outdir/
+	
 		ls -lhRA
 		EOS
 )

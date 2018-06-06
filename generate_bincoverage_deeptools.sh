@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -o pipefail
+set -o nounset
 
 # default arg
 workdir=$PWD
@@ -7,13 +9,14 @@ quality=10
 dedup='yes'
 extend=200
 binsize=1000
+raw='no'
 
 # help message
 help_message="
+Wrapper to run DeepTools multiBamSummary to generate genome coverage data.
+
 usage:
-    bash $(basename "$0") [-wrtblgneh] -b <BAM>
-purpose:
-    # Wrapper to run deeptools multiBamSumarry to generate genome coverage data.
+    bash $(basename "$0") [-options] -b <BAM>
 required arguments:
     -b|--bam : comma seperated list of bam files
 optional arguments:
@@ -26,6 +29,7 @@ optional arguments:
                    (to disable simply set to 0)
     -d|--dedup : whether to filter duplicates [yes,no] (default = yes)
     -s|--binsize : binning for track output (default = 1000)
+    --raw : whether to output raw counts matrix [yes|no] (default = no)
 
 "
 
@@ -69,14 +73,22 @@ while [[ $# -gt 1 ]]; do
             binsize=$2
             shift
             ;;
+        --raw)
+            raw=$2
+            shift
+            ;;
         *)
-            echo "Error: Illegal argument"
-            echo "$help_message"
-            exit 1
+            printf "Error: Unrecognised argument: %s %s" $1 $2
+            echo "$help_message"; exit 1
             ;;
     esac
     shift
 done
+
+# set logdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=$outdir
+fi
 
 # check bam argument is provided and split
 if [[ -z "${bam_list:-}" ]]; then
@@ -110,53 +122,75 @@ fi
 if [[ $dedup = yes ]]; then
     dedup_arg="--samFlagExclude 1024"
 fi
-if [[ ! -z ${binsize:-} ]]; then
+if [[ -n ${binsize:-} ]]; then
     bs_arg="--binSize $binsize"
 fi
-if [[ ! -z ${region:-} ]]; then
+if [[ -n ${region:-} ]]; then
     region_arg="--region $region"
 fi
-if [[ ! -z ${extend:-} ]]; then
+if [[ -n ${extend:-} ]]; then
     extend_arg="--extendReads $extend"
 fi
-if [[ ! -z ${quality:-} ]]; then
+if [[ -n ${quality:-} ]]; then
     qual_arg="--minMappingQuality $quality"
+fi
+if [[ $raw = 'yes' ]]; then
+    raw_arg="--outRawCounts $name.bin_counts.tab"
 fi
 
 # create required dirs
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
+# set log files
+scr_name=$(basename "$0" .sh)
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
+# set commands
+multibam_cmd=("multiBamSummary bins --bamfiles $bam_arg --outFileName $name.npz"
+              "--numberOfProcessors 18 ${region_arg:-} ${extend_arg:-}"
+              "${qual_arg:-} ${dedup_arg:-} ${bs_arg:-} ${raw_arg:-}")
+
 # run job
-jobid=$(cat <<- EOS | qsub -N $name.multibam - 
+script=$(cat <<- EOS
 	#!/bin/bash
-	#PBS -l walltime=05:00:00
-	#PBS -l select=1:mem=10gb:ncpus=20
+	#PBS -l walltime=24:00:00
+	#PBS -l select=1:mem=12gb:ncpus=18
 	#PBS -j oe
+	#PBS -N $name.multibam
 	#PBS -q med-bio
-	#PBS -o $workdir/$logdir/$name.generate_bincoverage_deeptools.log
+	#PBS -o $std_log
 	
 	# load modules
 	module load samtools/1.2
-	module load anaconda/2.4.1
-	module load deeptools/2.4.2
-	source activate deeptools-2.4.2    
+	module load anaconda
+	source activate my_deeptools-2.4.2    
+
+	printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 	# copy to scratch
-	$bam_cp
+	$bam_cp &>> $out_log
 
 	# generate coverage
-	multiBamSummary bins \
-		--bamfiles $bam_arg \
-		--outFileName $name.npz \
-		--numberOfProcessors 20 \
-		${region_arg:-} \
-		${extend_arg:-} \
-        ${qual_arg:-} \
-        ${dedup_arg:-} \
-        ${bs_arg:-} \
+	${multibam_cmd[@]} &>> $out_log
 	
-	cp $name.npz $workdir/$outdir
+	cp $name* $workdir/$outdir/ &>> $out_log
+	
+	printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+
+	ls -lhAR &>> $out_log
 	ls -lhAR
+	cp $out_log $workdir/$logdir/
+
 	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
+echo "JOBID: $jobid"
+exit 0

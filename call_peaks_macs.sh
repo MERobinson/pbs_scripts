@@ -11,11 +11,10 @@ check='yes'
 
 # help message
 help_message="
+Wrapper to call peaks with MACS2 
 
 usage:
     bash $(basename "$0") [-options] -t <BAM>
-purpose:
-    Wrapper to call peaks with macs2
 required arguments:
     -t|--test : test sample [BAM]
     -F|--fasta : whole genome fasta file
@@ -126,8 +125,9 @@ if [[ $check = yes ]]; then
 fi
 
 # set name if not provided
-if [[ -z "$name" ]]; then
-    name=${test%%.*}
+if [[ -z ${name:-} ]]; then
+    name=$(basename $test)
+    name=${name%%.*}
 fi
 
 # set basename
@@ -151,48 +151,56 @@ if [[ ! -z "${extsize:-}" ]]; then
 	extsize_macs="--nomodel --extsize $extsize"
 fi
 
-# set depend arg
-if [[ ! -z ${depend:-} ]]; then
-    depend="#PBS -W depend=$depend"
-fi
-
 # create output dirs
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir
 
+# set log file names
+scr_name=$(basename "$0" .sh)
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
 # run job
-jobid=$(cat <<- EOS | qsub -N $name.macs -
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=05:00:00
+		#PBS -l walltime=24:00:00
 		#PBS -l select=1:mem=10gb:ncpus=4
 		#PBS -j oe
+		#PBS -N $name.macs
 		#PBS -q med-bio
 		#PBS -o $workdir/$logdir/$name.call_peaks_macs.log
 		${depend:-}
 
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+
 		# load modules
-		module load samtools/1.2
-		module load macs/2.1.0
+		module load samtools/1.2 &>> $out_log
+		module load macs/2.1.0 &>> $out_log
 
 		# copy to scratch
-		cp $workdir/$test* .
-		${control_cp:-}
+		cp $workdir/$test* . &>> $out_log
+		${control_cp:-} 
 
 		# filter bams to remove dup/lowqual/scaffold
+		printf "\nFiltering input bams:\n" >> $out_log
 		samtools view -b -F 1024 -q 10 $test_base $chr_list > tmp.bam
 		mv tmp.bam $test_base; samtools index $test_base
 		${control_filter:-}
 
 		# run predictd for qc
+		printf "\nPredicting insert size:\n" >> $out_log
 		macs2 predictd \
 			-i $test_base \
 			-g $genome \
 			--outdir . \
-			--rfile $name.predictd.R
-		Rscript $name.predictd.R
-		cp $name.predictd.R* $workdir/$qcdir/
+			--rfile $name.predictd.R &>> $out_log
+		Rscript $name.predictd.R &>> $out_log
+		cp $name.predictd.R* $workdir/$qcdir/ &>> $out_log
 
+		# call peaks
+		printf "\nCalling peaks:\n" >> $out_log
 		macs2 callpeak \
 			-t $test_base \
 			-g $genome \
@@ -200,14 +208,23 @@ jobid=$(cat <<- EOS | qsub -N $name.macs -
 			-n $name \
 			--bdg \
 			${control_macs:-} \
-			${extsize_macs:-}
+			${extsize_macs:-} &>> $out_log
 
-		cp ${name}_peaks.narrowPeak $workdir/$outdir/
-		cp ${name}_peaks.xls $workdir/$outdir/
-		cp ${name}_treat_pileup.bdg $workdir/$outdir/
-		cp ${name}_control_lambda.bdg $workdir/$outdir/
+		cp ${name}_peaks.narrowPeak $workdir/$outdir/ &>> $out_log
+		cp ${name}_peaks.xls $workdir/$outdir/ &>> $out_log
+		cp ${name}_treat_pileup.bdg $workdir/$outdir/ &>> $out_log
+		cp ${name}_control_lambda.bdg $workdir/$outdir/ &>> $out_log
 
-		ls -lhAR
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhAR &>> $out_log
+		cp $out_log $workdir/$logdir/
 	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
 echo "JOBID: $jobid"
+exit 0

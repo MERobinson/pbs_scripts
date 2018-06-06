@@ -139,7 +139,7 @@ if [[ $format = 'bedgraph' ]]; then
 	extension="bedGraph"
     trackline="track type=$extension name=$name visibility=2 windowingFunction=mean autoScale=off"
     trackline="${trackline} smoothingWindow=10 viewLimits=0:75 maxHeightPixels=0:75:150"
-    if [[ -n ${db:-} ]]; then trackline="${trackline} bd=$db"; fi
+    if [[ -n ${db:-} ]]; then trackline="${trackline} db=$db"; fi
     format_arg="cat $name.$extension | grep -E \"^chr[0-9XYM]+\b\" > tmp.txt"
     format_arg="${format_arg:-}; echo $trackline | cat - tmp.txt > $name.$extension"
 elif [[ $format = 'bigwig' ]]; then
@@ -163,10 +163,16 @@ std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$workdir/$logdir/$name.$scr_name.out.log
 
+# compile commands
+bamcov_command=("bamCoverage --extendReads $extend --binSize $binsize"
+                "--normalizeUsingRPKM --ignoreForNormalization chrX"
+                "--numberOfProcessors 20 --outFileFormat $format"
+                "--bam $name.filt.bam --outFileName $name.$extension")
+
 # run job
 script=$(cat <<- EOS 
 		#!/bin/bash
-		#PBS -l walltime=01:00:00
+		#PBS -l walltime=24:00:00
 		#PBS -l select=1:mem=10gb:ncpus=20
 		#PBS -j oe
 		#PBS -N $name.track
@@ -174,7 +180,7 @@ script=$(cat <<- EOS
 		#PBS -o $std_log
 		${depend:-}
 
-		echo START: \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# load modules
 		module load samtools/1.2
@@ -183,27 +189,19 @@ script=$(cat <<- EOS
 		source activate deeptools-2.4.2    
 
 		# copy resource files to scratch
-		cp $workdir/$bam* .
+		cp $workdir/$bam* . &>> $out_log
 
 		# filter bam prior to making track
 		samtools view -b $dedup_arg -q $quality $bam_base $chr_list > $name.filt.bam
     	samtools index $name.filt.bam
 
 		# generate coverage track
-		bamCoverage \
-			--extendReads $extend \
-			--binSize $binsize \
-			--normalizeUsingRPKM \
-			--ignoreForNormalization chrX \
-			--numberOfProcessors 20 \
-			--outFileFormat $format \
-			--bam $name.filt.bam \
-			--outFileName $name.$extension &>> $out_log
+		${bamcov_command[@]} &>> $out_log
 
 		${format_arg:-}	
-		mv $name.$extension $workdir/$outdir/
+		mv $name.$extension $workdir/$outdir/ &>> $out_log
 
-		echo END: \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR
 	EOS
 )

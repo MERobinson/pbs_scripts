@@ -10,10 +10,10 @@ check="yes"
 
 # help message
 help_message="
+Wrapper to run Mutect2 (GATK v3).
+
 usage:
-    bash $(basename "$0") [-options] -t <sample1.T.bam> -f <genome.fa>
-purpose:
-    # simple wrapper to run mutect2 (GATK v3)
+    bash $(basename "$0") [-options] -t <TUMOR_BAM> -f <FASTA>
 required arguments:
     -t|--tumor : tumor sample BAM file
     -f|--fasta : whole genome FASTA file

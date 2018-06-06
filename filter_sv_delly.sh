@@ -7,14 +7,15 @@ set -o nounset
 workdir=$PWD
 outdir=''
 check='yes'
+date=`date '+%Y-%m-%d %H:%M:%S'`
+scr_name=$(basename "$0")
 
 # help message
 help_message="
+Wrapper to filter structural variants with Delly2
 
 usage:
-    bash $(basename "$0") [-options] -b <BCF> -v <VAR>
-purpose:
-    Wrapper to filter structural variants with Delly2
+    bash $scr_name [-options] -b <BCF> -v <VARTYPE>
 required arguments:
     -b|--bcf : structural variants file [BCF]
     -v|--vartype : variant type [INS,DEL,INV,BND,DUP]
@@ -108,7 +109,6 @@ if [[ $check = yes ]]; then
     fi
 fi
 
-
 # check variant type 
 vartype_list="INS DEL INV BND DUP"
 if [[ ! "$vartype_list" =~ (^|[[:space:]])$vartype($|[[:space:]]) ]]; then
@@ -141,14 +141,25 @@ fi
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
-# run job 
-jobid=$(cat <<- EOS | qsub -N $name.filter_sv_delly -
+# set commands
+filter_command=("delly filter -t $vartype -f $filter_type -o $name.bcf"
+                "${si_arg:-} $bcf_base")
+
+# set log file names
+scr_name=${scr_name%.*}
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
+# write script
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=20:00:00
-		#PBS -l select=1:mem=20gb:ncpus=1
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:mem=18gb:ncpus=1
 		#PBS -j oe
+		#PBS -N $name.filt
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.filter_sv_delly.log
+		#PBS -o $std_log
 		${depend:-}
 
 		# load required modules
@@ -156,19 +167,27 @@ jobid=$(cat <<- EOS | qsub -N $name.filter_sv_delly -
 		module load anaconda3/personal
 		source activate delly
 
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+
 		# copy required inputs to scratch
-		cp $workdir/$bcf* .
-		${si_cp:-}
+		cp $workdir/$bcf* . &>> $out_log
+		${si_cp:-} &>> $out_log
 
 		# run delly
-		delly filter -t $vartype \
-			-f $filter_type \
-			-o $name.bcf \
-			${si_arg:-} $bcf_base 
+		${filter_command[@]} &>> $out_log
 
-		cp $name.bcf* $workdir/$outdir/
-		
-		ls -lhRA
+		cp $name.bcf* $workdir/$outdir/ &>> $out_log
+
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log		
+		ls -lhRA >> $out_log
+		cp $out_log $workdir/$logdir
 		EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
 echo "JOBID: $jobid"
+exit 0

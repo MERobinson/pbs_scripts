@@ -1,0 +1,34 @@
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=1:mem=16gb
+#PBS -j oe
+#PBS -N variant_anno
+#PBS -o germline_snv.variant_anno.log
+#PBS -q med-bio
+
+module load java/jdk-8u66
+module load picard/2.6.0
+module load gatk/3.6
+module load samtools/1.2
+
+cp /work/mrobinso/AK_pannets/variants/germline_snv.vcf.gz* .
+cp /work/mrobinso/resources/homo_sapiens/GRCh38/gatk/Homo_sapiens_assembly38* .
+cp /work/mrobinso/resources/homo_sapiens/GRCh38/gatk/dbsnp_144.hg38.vcf.gz* .
+cp /work/mrobinso/resources/homo_sapiens/GRCh38/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz* .
+cp /work/mrobinso/resources/homo_sapiens/GRCh38/gatk/cosmic_coding_noncoding.vcf.gz* .
+
+java -jar /apps/gatk/3.6/GenomeAnalysisTK.jar \
+    -R Homo_sapiens_assembly38.fasta \
+    -T VariantAnnotator \
+    --resource:COSMIC,vcf cosmic_coding_noncoding.vcf.gz \
+    -E 'COSMIC.ID' \
+    -E 'dbSNP.SAO' \
+    -E 'dbSNP.RS' \
+    -E 'dbSNP.MUT' \
+    -E 'dbSNP.CAF' \
+    -E 'dbsnp.COMMON' \
+    --dbsnp dbsnp_144.hg38.vcf.gz \
+    --alwaysAppendDbsnpId \
+    -o germline_snv.anno.vcf \
+    -V germline_snv.vcf.gz
+
+cp germline_snv.anno.vcf /work/mrobinso/AK_pannets/variants/

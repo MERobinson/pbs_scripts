@@ -22,7 +22,6 @@ optional arguments:
     -n|--name : name prefix for output files (default = SRA accession)
     -o|--outdir : output directory (default = PWD)
     -ld|--logdir : output directory for log files (default = --outdir)
-    -fq|--fqdir : output directory for fastq files (defalt = --outdir)
     -sd|--sradir : directory setup for sra toolkit (default = ~/sradata/sra)
     --check : whether to check input files [yes,no] (default = yes)
     --depend : list of PBS dependencies (default = NULL)
@@ -52,10 +51,6 @@ while [[ $# -gt 1 ]]; do
             ;;
         -ld|--logdir)
             logdir=$2
-            shift
-            ;;
-        -fd|--fqdir)
-            fqdir=$2
             shift
             ;;
         --check)
@@ -89,12 +84,9 @@ fi
 if [[ -z ${logdir:-} ]]; then
     logdir=$outdir
 fi
-if [[ -z "${fqdir:-}" ]]; then
-    fqdir=$outdir
-fi
 
 # create outdir if needed
-mkdir -p $workdir/$fqdir
+mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
 # set log file names
@@ -106,33 +98,37 @@ out_log=$workdir/$logdir/$name.$scr_name.out.log
 # job
 script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=02:00:00
-		#PBS -l select=1:mem=10gb:ncpus=1
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:mem=24gb:ncpus=1
 		#PBS -j oe
 		#PBS -N $name.sra
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.fetch_fastq_sra.log
+		#PBS -o $std_log
 
-		echo START: \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 	
 		# load modules
 		module load sra-toolkit/2.8.1-3
 
 		# prefetch
-		if [[ ! -e $workdir/$sradir/$sra.sra ]]; then
-			prefetch --max-size 100G $sra >> $out_log
+		if [[ ! -e $sradir/$sra.sra ]]; then
+			echo "Pre-fetching SRA:" >> $out_log
+			prefetch --max-size 500G $sra &>> $out_log
+		else
+			echo "SRA already exists" >> $out_log
 		fi
 
 		# dump
-		cp $sradir/$sra.sra .
+		echo "Extracting FASTQ:" >> $out_log
+		cp $sradir/$sra.sra . &>> $out_log
 		fastq-dump -v -I -W -B --skip-technical --outdir . \
-			--gzip --split-files $sra.sra >> $out_log
+			--gzip --split-files $sra.sra &>> $out_log
 
 		# copy to outdir
-		cp $sra*.fastq.gz $workdir/$outdir/
+		cp $sra*.fastq.gz $workdir/$outdir/ &>> $out_log
 
-		echo END: \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
-		ls -lhAR
+		ls -lhRA >> $out_log
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 	EOS
 )
 echo "$script" > $pbs_log

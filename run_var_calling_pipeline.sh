@@ -166,7 +166,7 @@ while [[ $# -gt 1 ]]; do
             echo "$help_message"; exit 1
         ;;
     esac
-shift
+hift
 done
 
 # check required arg
@@ -185,7 +185,7 @@ fi
 if [[ ! -d "$workdir/$fqdir" ]]; then
     printf "\nERROR: FASTQ directory doesnt exist: %s/%s\n" $workdir $fqdir
     echo "$help_message"; exit 2
-fi
+
 if [[ ! -r "$workdir/$resdir/$index.sa" ]]; then
     printf "\nERROR: Index file doesnt exist/isnt readable: %s/%s/%s\n" $workdir $resdir $index
     echo "$help_message"; exit 2

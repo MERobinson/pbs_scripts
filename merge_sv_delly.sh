@@ -8,29 +8,31 @@ workdir=$PWD
 outdir=''
 check='yes'
 name="germline_sv"
+date=`date '+%Y-%m-%d %H:%M:%S'`
+scr_name=$(basename "$0")
 
 # help message
 help_message="
+Wrapper to merge structural variants (by variant) with Delly2
 
 usage:
-    bash $(basename "$0") [-options] -s <SV,LIST> -v <VAR>
-purpose:
-    Wrapper to merge structural variants with Delly2
+    bash $(basename "$0") [-options] -s <bcf,list> -v <vartype>
 required arguments:
-    -s|--sv_list : list of sv files to merge [BCF]
+    -s|--sv_list : comma separated list of sv files to merge [BCF]
     -v|--vartype : variant type to analyse [INS,DEL,INV,BND,DUP]
 optional arguments:
     -o|--outdir : output directory [string] (default = '.')
-    -l|--logdir : output directory for log files [string] (default = --outdir)
+    -ld|--logdir : output directory for log files [string] (default = --outdir)
     -n|--name : prefix for output files [string] (deafult = 'germline_sv')
-    --delly_arg : any additional arg to pass to delly [string] (default = NULL)
+    --max : maximum sv size [integer] (default = 1000000)
+    --min : minimum sv size [integer] (default = 0)
+    --offset : maximum breakpoint offset [integer] (default = 1000)
+    --overlap : minimum recipricol overlap [float] (default = 0.8)
     --check : whether to check input files [yes|no] (default = 'yes')
     --depend : list pf PBS dependencies [string] (default = NULL)
 additional info:
     # all paths should be relative to working directory
     # check and depend arguments are used for job scheduling/pipelines
-    # --delly_arg should be provided as quoted list of arguments,
-      and are passed as-is to delly. e.g. --delly_arg '-q 20 --noindels'
     # see Delly2 man for additional info: https://github.com/dellytools/delly
 
 "
@@ -47,7 +49,7 @@ while [[ $# -gt 1 ]]; do
             outdir=$2
             shift
             ;;
-        -l|--logdir)
+        -ld|--logdir)
             logdir=$2
             shift
             ;;
@@ -59,8 +61,20 @@ while [[ $# -gt 1 ]]; do
             vartype=$2
             shift
             ;;
-        --delly_arg)
-            delly_arg=$2
+        --max)
+            max_arg="-n $2"
+            shift
+            ;;
+        --min)
+            min_arg="-m $2"
+            shift
+            ;;
+        --overlap)
+            ol_arg="-r $2"
+            shift
+            ;;
+        --offset)
+            bp_arg="-b $2"
             shift
             ;;
         --check)
@@ -92,7 +106,7 @@ else
     IFS="," read -ra sv_array <<< "$sv_list"
 fi
 if [[ -z "${vartype:-}" ]]; then
-    printf "\nERROR: No --var argument provided\n"
+    printf "\nERROR: No --vartype argument provided\n"
     echo "$help_message"; exit 1 
 fi
 
@@ -105,7 +119,6 @@ if [[ $check = yes ]]; then
         fi
     done
 fi
-
 
 # check variant type 
 vartype_list="INS DEL INV BND DUP"
@@ -127,14 +140,25 @@ bcf_arg=${bcf_arg#* }
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
-# run job 
-jobid=$(cat <<- EOS | qsub -N $name.merge_sv_delly -
+# set commands
+merge_command=("delly merge -t $vartype -o $name.bcf ${bp_arg:-} ${ol_arg:-}"
+               "${max_arg:-} ${min_arg:-} $bcf_arg")
+
+# set log file names
+scr_name=${scr_name%.*}
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
+# write script 
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=20:00:00
-		#PBS -l select=1:mem=40gb:ncpus=1
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:mem=24gb:ncpus=1
 		#PBS -j oe
+		#PBS -N $name.merge
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.merge_sv_delly.log
+		#PBS -o $std_log
 		${depend:-}
 
 		# load required modules
@@ -142,18 +166,26 @@ jobid=$(cat <<- EOS | qsub -N $name.merge_sv_delly -
 		module load anaconda3/personal
 		source activate delly
 
-		# copy required inputs to scratch
-		$bcf_cp
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+
+		# copy inputs to scratch
+		$bcf_cp &>> $out_log
 
 		# run delly for each variant type
-		delly merge -t $vartype \
-			-o $name.bcf \
-			-m 500 -b 500 -r 0.5 \
-			${delly_arg:-} $bcf_arg
+		${merge_command[@]} &>> $out_log
 
-		cp $name.bcf* $workdir/$outdir/
-		
-		ls -lhRA
-		EOS
+		cp $name.bcf* $workdir/$outdir/ &>> $out_log
+
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhRA >> $out_log
+		cp $out_log $workdir/$logdir
+	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
 echo "JOBID: $jobid"
+exit 0

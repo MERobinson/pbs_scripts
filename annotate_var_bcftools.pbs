@@ -1,0 +1,19 @@
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=1:mem=16gb
+#PBS -j oe
+#PBS -N variant_anno
+#PBS -o germline_snv.variant_anno.log
+#PBS -q med-bio
+
+module load java/jdk-8u66
+module load bcftools
+
+cp /work/mrobinso/AK_pannets/variants/germline_snv.vcf.gz* .
+cp /work/mrobinso/resources/homo_sapiens/GRCh38/gatk/dbsnp_144.hg38.vcf.gz* .
+
+bcftools annotate \
+    -a dbsnp_144.hg38.vcf.gz \
+    -c ID,SAO,CAF,COMMON \
+    germline_snv.vcf.gz > germline_snv.anno2.vcf
+
+cp germline_snv.anno2.vcf /work/mrobinso/AK_pannets/variants/

@@ -1,58 +1,66 @@
 #!/usr/bin/env bash
+set -o errexit
 set -o pipefail
 set -o nounset
 
 # default arg
 workdir=$PWD
 outdir=''
-check='yes'
+check='y'
 date=`date '+%Y-%m-%d %H:%M:%S'`
-scr_name=$(basename "$0")
+bwa_version='0.7.15'
+
+# default header args
+pl="PLATFORM=ILLUMINA"
 
 # help message
 help_message="
-Wrapper to align reads with BWA
+Wrapper to convert FASTQ to cleaned, aligned BAM for WGS/WES data & generate metrics
 
 usage:
-    bash $scr_name [-options] -fq1 <FASTQ>
+    bash $(basename $0) [-options] -fq1 <FASTQ_R1> -fq2 <FASTQ_R2>
 required arguments:
-    -fq1|--fastq1 : FASTQ filename of read 1 
+    -fq1|--fastq1 : FASTQ R1 (single sample/run)
     -F|--fasta : reference FASTA used in index generation
-    -I|--index : BWA index prefix to align against 
+    -I|--index : BWA index prefix
 optional arguments:
-    -fq2|--fastq2 : FASTQ filename of read 2 (if paired end)
-    -n|--name : name prefix for output files (default = FASTQ filename)
-    -o|--outdir : output directory for bam files (default = PWD)
-    -q|--qcdir : output directory for qc metrics (default = --outdir)
+    -fq2|--fastq2 : FASTQ R2 (single sample/run)
+    -o|--outdir : output directory (default = pwd)
+    -n|--name : name prefix for output files (deafult = FASTQ filename)
+    -q|--qcdir : output directory for qc files (default = --outdir)
     -l|--logdir : output directory for log files (default = --outdir)
-    --check : whether to check input files [yes,no] (default = yes)
-    --depend : list of PBS dependencies (default = NULL)
+    --check : whether to check input files prior to run [y|n] (default = y)
+    --depend : list of PBS dependencies to pass to PBS script (default = NULL)
 bam header arguments:
-    --sm : sample name (default = name)
+    --sm : sample anme (default = name)
     --id : read group ID (usually flow cell + lane)
     --lb : library name (name unique to each library)
     --pu : platform unit (usually flow cell + barcode + lane)
-    --pl : sequencing platform sequenced on, valid options:
+    --pl : sequencing platform (default = ILLUMINA), valid options;
            [ILLUMINA,PACBIO,IONTORRENT,ONT,CAPILLARY,LS454,SOLID,HELICOS]
-    --cn : sequencing centre sequencing was performed at 
+    --cn : sequencing centre
     --dt : run date (Iso8601Date)
-    --pi : predicted median insert size (e.g. 200)
-    --pm : platform model - further discription of platform
+    --pi : predicted median insert size
+    --pm : platform model (further descrition of platform)
 additional info:
     # all paths should be relative to working directory
-    # check and depend options used for job scheduling
-    # log/qc output directories inherit from --outdir unless specified
-    # any of the bam header arguments provided will be included in the header
-    # if platform is ILLUMINA - will automatically extract PU and ID from read name 
+    # check and depend options useful for job scheduling
+      e.g. --depend afterok:123456,afterok:123457
+    # log/qc output directories inherited from outdir unless specified
+    # any bam header arguments specified will be added to output bam header
+    # if platform = ILLUMINA (default), will extract PU and ID from read name
 
 "
-
-# parse command line arg
+# parse command line arguments
 while [[ $# -gt 1 ]]; do
-    key=$1
-    case $key in
+	key=$1
+	case $key in
         -fq1|--fastq1)
             fq1=$2
+            shift
+            ;;
+        -fq2|--fastq2)
+            fq2=$2
             shift
             ;;
         -F|--fasta)
@@ -63,11 +71,7 @@ while [[ $# -gt 1 ]]; do
             index=$2
             shift
             ;;
-        -fq2|--fastq2)
-            fq2=$2
-            shift
-            ;;
-        -o|--outdir)
+         -o|--outdir)
             outdir=$2
             shift
             ;;
@@ -128,14 +132,14 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         *)
-            printf "ERROR: Unrecognised argument: %s %s" $1 $2
+            printf "\nERROR: Unrecognised argument: %s %s\n" $1 $2
             echo "$help_message"; exit 1
             ;;
-    esac
-    shift
+	esac
+	shift
 done
 
-# check required argument
+# check required arguments
 if [[ -z ${fq1:-} ]]; then
     printf "\nERROR: --fastq1 argument required\n"
     echo "$help_message"; exit 1
@@ -147,36 +151,48 @@ elif [[ -z ${index:-} ]]; then
     echo "$help_message"; exit 1
 fi
 
-# check files 
-if [[ "${check:-}" = yes ]]; then
-    if [[ ! -r $fq1 ]]; then
-        printf "\nERROR: FASTQ r1 cannot be read: %s/%s\n" $workdir $fq1
+# check files
+if [[ ${check} = 'y' ]]; then
+    if [[ ! -r ${fq1} ]]; then
+        printf "ERROR: file is not readable: %s/%s" $workdir ${fq1}
         echo "$help_message"; exit 1
-    elif [[ ! -z "${fq2:-}" ]] && [[ ! -r "${fq2:-}" ]]; then
-        printf "\nERROR: FASTQ r2 cannot be read: %s/%s\n" $workdir ${fq2:-}
+    elif [[ -n ${fq2:-} && ! -r ${fq2:-} ]]; then
+        printf "ERROR: file is not readable: %s/%s" $workdir ${fq2}
         echo "$help_message"; exit 1
-    elif [[ ! -r $fasta ]]; then
-        printf "\nERROR: FASTA file cannot be read: %s/%s\n" $workdir $fasta
+    elif [[ ! ${fq1} =~ .(fq|fastq)(.gz)? ]]; then
+        printf "ERROR: file extension not recognised: %s/%s" $workdir ${fq1}
         echo "$help_message"; exit 1
-    elif [[ ! -e $index.bwt ]]; then
-        printf "\nERROR: Index file does not exist: %s/%s\n" $workdir $index
+    elif [[ -n ${fq2:-} && ! ${fq2:-} =~ .(fq|fastq)(.gz)? ]]; then
+        printf "ERROR: file extension not recognised: %s/%s" $workdir ${fq2}
+        echo "$help_message"; exit 1
+    elif [[ ! -r ${fasta} ]]; then
+        printf "ERROR: FASTA is not readable: %s/%s" $workdir ${fasta}
+        echo "$help_message"; exit 1
+    elif [[ ! -r ${index}.alt ]]; then
+        printf "ERROR: BWA ALT index is not readable: %s/%s" $workdir ${index}.alt
         echo "$help_message"; exit 1
     fi
 fi
 
-# set output directories
+# check/set name
+if [[ -z ${name:-} ]]; then
+	name=$(basename $fq1)
+    name=${name%%.*}
+fi
+if [[ -z ${sm:-} ]]; then
+    sm="SAMPLE_NAME=$name"
+fi
+
+# check/set outdirs
 if [[ -z ${logdir:-} ]]; then
     logdir=$outdir
 fi
 if [[ -z "${qcdir:-}" ]]; then
     qcdir=$outdir
 fi
-
-# create output dirs
-mkdir -p $workdir/$outdir
-mkdir -p $workdir/$logdir
-mkdir -p $workdir/$qcdir/fastqc
-mkdir -p $workdir/$qcdir/metrics
+mkdir -p $logdir
+mkdir -p $qcdir/fastqc
+mkdir -p $qcdir/metrics
 
 # set basenames
 fq1_base=$(basename "$fq1")
@@ -190,20 +206,10 @@ if [[ ! -z "${fq2:-}" ]]; then
     fq2_base=$(basename "$fq2")
     fq2_fq2sam="FASTQ2=$fq2_base"
     fq2_bwamem="-p"
-    fq2_qc_mv="mv ${fq2_base##.*}_fastqc.zip $workdir/$qcdir/fastqc/${name}_fastqc.zip"
+    fq2_qc_mv="mv fastqc/${fq2_base%%.*}_fastqc.zip $workdir/$qcdir/fastqc"
 fi
 
-# extract filename prefix if not provided
-if [[ -z "${name:-}" ]]; then
-    name=${fq1_base%%.*}
-fi
-
-# set sample name to name if not provided
-if [[ -z "${sm:-}" ]]; then
-    sm="SAMPLE_NAME=$name"
-fi
-
-# extract read group info (if not provided)
+# extract read group info
 if [[ ${pl:-} = "PLATFORM=ILLUMINA" ]]; then
     IFS=":" read -r -a read_name <<< $(gzip -dc $fq1 | head -n 1)
     fcid=${read_name[2]} # flow cell ID
@@ -214,86 +220,90 @@ if [[ ${pl:-} = "PLATFORM=ILLUMINA" ]]; then
 fi
 
 # set commands
-fastqc_command=("fastqc --noextract -o fastqc -t 20 ${fq1_base} ${fq2_base:-}")
-fq2sam_command=("java -jar -Xmx32G -jar /apps/picard/2.6.0/picard.jar FastqToSam" 
-                "FASTQ=${fq1_base}" 
-                "OUTPUT=${name}.bam" 
-                "${fq2_fq2sam:-} ${id:-} ${lb:-} ${pl:-}" 
-                "${pu:-} ${pm:-} ${cn:-} ${dt:-} ${pi:-} ${sm:-}")
+fastqc_command=("fastqc --noextract -o fastqc -t 20 $fq1_base ${fq2_base:-}")
+fq2sam_command=("java -jar -Xmx32G -jar /apps/picard/2.6.0/picard.jar FastqToSam"
+                "FASTQ=$fq1_base"
+                "OUTPUT=$name.unaligned.bam"
+                "${fq2_fq2sam:-} ${sm:-}"
+                "${id:-} ${lb:-} ${pl:-} ${pu:-}"
+                "${pm:-} ${cn:-} ${dt:-} ${pi:-}")
 madapt_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MarkIlluminaAdapters"
-                "I=${name}.bam"
-                "O=${name}.markadapters.bam"
-                "M=${name}.mark_adapters_metrics")
+                "I=$name.unaligned.bam"
+                "O=$name.markadapters.bam"
+                "M=$name.mark_adapters_metrics")
 sam2fq_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar SamToFastq"
-                "I=${name}.markadapters.bam" 
-                "FASTQ=${name}.fq" 
-                "CLIPPING_ATTRIBUTE=XT" 
-                "CLIPPING_ACTION=2" 
-                "INTERLEAVE=true" 
+                "I=$name.markadapters.bam"
+                "FASTQ=$name.fq"
+                "CLIPPING_ATTRIBUTE=XT"
+                "CLIPPING_ACTION=2"
+                "INTERLEAVE=true"
                 "NON_PF=true")
-align_command=("bwa mem -M -t 20 ${fq2_bwamem:-} ${index_base} ${name}.fq > ${name}.aligned.sam")
+align_command=("bwa mem -M -t 20 ${fq2_bwamem:-} $index_base $name.fq > $name.aligned.sam")
 merge_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MergeBamAlignment"
-                "R=${fasta_base}" 
-                "UNMAPPED_BAM=${name}.unaligned.bam" 
+                "R=${fasta_base}"
+                "UNMAPPED_BAM=${name}.unaligned.bam"
                 "ALIGNED=${name}.aligned.sam"
                 "O=${name}.bam"
-                "CREATE_INDEX=true"
+                "VALIDATION_STRINGENCY=SILENT"
+				"SORT_ORDER=unsorted"
+                "ALIGNED_READS_ONLY=false"
                 "ADD_MATE_CIGAR=true"
                 "CLIP_ADAPTERS=false"
                 "CLIP_OVERLAPPING_READS=true"
-                "INCLUDE_SECONDARY_ALIGNMENTS=true" 
+                "INCLUDE_SECONDARY_ALIGNMENTS=true"
                 "MAX_INSERTIONS_OR_DELETIONS=-1"
-                "PRIMARY_ALIGNMENT_STRATEGY=MostDistant" 
-                "ATTRIBUTES_TO_RETAIN=XS")
+                "PRIMARY_ALIGNMENT_STRATEGY=MostDistant"
+                "ATTRIBUTES_TO_RETAIN=X0"
+                "PROGRAM_RECORD_ID=bwamem"
+                "PROGRAM_GROUP_VERSION=0.7.15"
+                "PROGRAM_GROUP_COMMAND_LINE=\"${align_command[@]}\""
+                "PROGRAM_GROUP_NAME=bwamem"
+                "UNMAP_CONTAMINANT_READS=true")
 mdup_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
-            	"I=${name}.bam"
-            	"O=${name}.mdup.bam"
-            	"M=${name}.mark_duplicate_metrics"
-            	"CREATE_INDEX=true")
-alstat_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
-            	"R=${fasta_base}"
-            	"I=${name}.bam"
-            	"O=${name}.alignment_summary_metrics")
-
+                "I=${name}.merge.bam"
+                "O=tmp.bam"
+                "M=${name}.mark_duplicate_metrics"
+				"OPTICAL_DUPLICATE_PIXEL_DISTANCE=2500"
+				"ASSUME_SORT_ORDER=queryname")
 
 # set log file names
-scr_name=${scr_name%.*}
+scr_name=$(basename $0 .sh)
 std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$name.$scr_name.out.log
 
 # write job script
-script=$(cat <<- EOS 
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=40gb:ncpus=20
+		#PBS -l walltime=72:00:00
+		#PBS -l select=1:mem=32gb:ncpus=20
 		#PBS -j oe
-		#PBS -N $name.bwa
+		#PBS -N $name.align
 		#PBS -q med-bio
 		#PBS -o $std_log
 		${depend:-}
 
 		# load modules
-		module load fastqc/0.11.2
-		module load samtools/1.2
-		module load java/jdk-8u66
 		module load picard/2.6.0
-		module load bio-bwa/0.7.10
+		module load java/jdk-8u66
+		module load bio-bwa/$bwa_version
+		module load fastqc/0.11.5
+		module load samtools/1.2
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
-		
-		# copy resource files to scratch
-		mkdir -p fastqc &>> $out_log
-		cp -L $workdir/$index* . &>> $out_log
-		cp -L $workdir/$fasta_prefix* . &>> $out_log
-		cp $workdir/$fq1 . &>> $out_log
+
+		# copy to scratch
+		mkdir fastqc &>> $out_log
+		cp -L $workdir/$fq1 . &>> $out_log
 		${fq2_cp:-}
+		cp -L $workdir/${fasta%%.*}* . &>> $out_log
+		cp -L $workdir/$index* . &>> $out_log
 
 		# run fastqc
 		printf "\nRunning FASTQC:\n" >> $out_log 
 		${fastqc_command[@]} &>> $out_log
-		mv ${fq1_base##.*}_fastqc.zip $workdir/$qcdir/fastqc/${name}_fastqc.zip
-		${fq2_qc_mv:-}
+		mv fastqc/${fq1_base%%.*}_fastqc.zip $workdir/$qcdir/fastqc &>> $out_log
+		${fq2_mv:-}
 
 		# covert fastq to ubam
 		printf "\nConverting to uBAM:\n" >> $out_log
@@ -303,7 +313,6 @@ script=$(cat <<- EOS
 		printf "\nMarking adapters:\n" >> $out_log
 		${madapt_command[@]} &>> $out_log
 		cp $name.mark_adapters_metrics $workdir/$qcdir/metrics/ &>> $out_log
-		mv ${name}.bam ${name}.unaligned.bam
 
 		# convert uBAM to interleaved fastq
 		printf "\nConverting to FASTQ:\n" >> $out_log
@@ -321,24 +330,18 @@ script=$(cat <<- EOS
 		printf "\nMarking duplicates:\n" >> $out_log
 		${mdup_command[@]} &>> $out_log
 		cp $name.mark_duplicate_metrics $workdir/$qcdir/metrics/ &>> $out_log
-		mv ${name}.mdup.bam ${name}.bam
-
-		# alignment metrics
-		printf "\nCollecting alignment metrics:\n" >> $out_log
-		${alstat_command[@]} &>> $out_log
-		cp $name.alignment_summary_metrics $workdir/$qcdir/metrics/ &>> $out_log
 
 		# copy final bam to outdir
 		samtools index $name.bam &>> $out_log
 		cp $name.bam* $workdir/$outdir/ &>> $out_log
- 
+
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR &>> $out_log
 		ls -lhAR 
 		cp $out_log $workdir/$logdir/
         
 	EOS
-) 
+)
 echo "$script" > $pbs_log
 
 # submit job
@@ -346,4 +349,4 @@ jobid=$(qsub "$pbs_log")
 
 # echo job id and exit
 echo "JOBID: $jobid"
-exit 0 
+exit 0

@@ -5,8 +5,9 @@ set -o nounset
 
 # default arg
 workdir=$PWD
-outdir=""
-check="yes"
+outdir=''
+check='yes'
+format='bcf'
 date=`date '+%Y-%m-%d %H:%M:%S'`
 scr_name=$(basename "$0")
 
@@ -17,10 +18,10 @@ Wrapper to GATK v3 CatVariants - to concatenate VCFs.
 usage:
     bash $scr_name [-options] -v <list,of,VCF> -F <FASTA>
 required arguments:
-    -v|--vcf_list : comma separated list of VCF files to cat
-    -F|--fasta : whole genome FASTA file
+    -v|--vcf_list : comma separated list of VCF/BCF files to cat
 optional arguments:
     -o|--outdir : output directory for concatenated VCF (default = PWD)
+    -f|--format : output format [vcf|bcf] (default = BCF)
     -ld|--logdir : output directory for log files (default = --outdir)
     -n|--name : name of output file [string] (default = extracted from first VCF)
     --check : whether to check input files [yes,no] (default = 'yes')
@@ -40,12 +41,12 @@ while [[ $# -gt 1 ]]; do
             vcf_list=$2
             shift
             ;;
-        -F|--fasta)
-            fasta=$2
-            shift
-            ;;
         -o|--outdir)
             outdir=$2
+            shift
+            ;;
+        -f|--format)
+            format=$2
             shift
             ;;
         -ld|--logdir)
@@ -84,10 +85,6 @@ if [[ -z ${vcf_list:-} ]]; then
 else
     IFS="," read -r -a vcf_array <<< "$vcf_list"
 fi
-if [[ -z ${fasta:-} ]]; then
-    printf "\nERROR: no fasta argument provided\n"
-    echo "$help_message"; exit 2
-fi
 
 # check files unless flagged
 if [[ $check = yes ]]; then
@@ -97,10 +94,6 @@ if [[ $check = yes ]]; then
             echo "$help_message"; exit 2
         fi
     done
-    if [[ ! -r $workdir/$fasta ]]; then
-        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
-        echo "$help_message"; exit 2
-    fi
 fi
 
 # get sample name if not provided
@@ -108,22 +101,25 @@ if [[ -z ${name:-} ]]; then
     name="${vcf_array[0]%%.*}.cat"
 fi
 
-# get basename/prefix for fasta
-fasta_base=$(basename "$fasta")
-fasta_prefix=${fasta%%.*}
-
 # set arg for VCF list copying and command input
 cp_arg=$(printf "cp $workdir/%s* . ;" ${vcf_array[@]})
-v_arg=$(printf -- "-V %s " ${vcf_array[@]##*/})
+
+# set format
+if [[ $format = "vcf" ]]; then
+    format_arg="-O v"; ext="vcf"
+elif [[ $format = "bcf" ]]; then
+    format_arg="-O b"; ext="bcf"
+else
+    printf "\nERROR: format argument not recognised\n"
+    echo "$help_message"; exit 1
+fi 
 
 # setup output directories
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$outdir
 
 # set commands
-cat_command=("java -cp /apps/gatk/3.6/GenomeAnalysisTK.jar"
-             "org.broadinstitute.gatk.tools.CatVariants"
-             "-R $fasta_base $v_arg -out $name.vcf")
+cat_command=("bcftools concat -o $name.$ext ${format_arg} --threads 8 ${vcf_array[@]##*/}")
 
 # set log file names
 scr_name=${scr_name%.*}
@@ -138,26 +134,23 @@ script=$(cat <<- EOS
 		#PBS -l select=1:mem=18gb:ncpus=1
 		#PBS -j oe
 		#PBS -N $name.cat
-		#PBS -q med-bio
+		##PBS -q med-bio
 		#PBS -o $std_log
 		${depend:-}		
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# load modules
-		module load picard/2.6.0
-		module load gatk/3.6
-		module load java/jdk-8u66
-		module load samtools/1.2
+		module load bcftools
 
 		# copy files to scratch
 		$cp_arg &>> $out_log
-		cp -rL $workdir/$fasta_prefix* . &>> $out_log
 
 		# call
 		${cat_command[@]} &>> $out_log
 
-		cp $name.vcf* $workdir/$outdir/  &>> $out_log
+		bcftools index $name.$ext
+		cp $name.$ext* $workdir/$outdir/  &>> $out_log
 		
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		printf "JOBID: %s\n" \${PBS_JOBID:-} >> $out_log

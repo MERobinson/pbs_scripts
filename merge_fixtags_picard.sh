@@ -6,38 +6,38 @@ set -o nounset
 # default arg
 workdir=$PWD
 outdir=''
-check='yes'
+check='y'
 date=`date '+%Y-%m-%d %H:%M:%S'`
-scr_name=$(basename "$0")
 
 # help message
 help_message="
 Merge BAM files from separate runs and generate metrics for merged alignments.
 
 usage:
-    bash $scr_name [-options] -b <bam,list>
+    bash $(basename "$0") [-options] -i <bam,list>
 required arguments:
-    -b|--bam_list : comma separated list of input BAM files to merge
+    -i|--input : comma separated list of BAM files to merge
     -F|--fasta : whole genome FASTA
 optional arguments:
     -n|--name : name prefix for output files (default = extracted from first bam)
-    -o|--outdir : outut directory for merged BAM (default = PWD)
+    -o|--outdir : outut directory (default = PWD)
     -q|--qcdir : output directory for qc metrics (default = --outdir)
     -l|--logdir : output directory for log files (default = --outdir)
-    --depend : comma-sep list of job dependencies - format afterok:<jobid>,afterok:<jobid>
-    --check : whether to check files prior to running job [yes,no] (default = yes)
+    --depend : list of job dependencies to pass to PBS job script
+    --check : whether to check files prior to running job [y|n] (default = y)
 additional_info:
     # all paths should be relative to working directory
-    # check and depend options used for job scheduling
-    # bam/log/qc output directories inherit from --outdir unless specified
+    # check and depend options useful for job scheduling
+      e.g. --depend afterok:123456,afterok:123457
+    # log/qc output directories inherit from outdir unless specified
 
 "
 
 # parse command line arg
-while [[ $# -gt 0 ]]; do
+while [[ $# -gt 1 ]]; do
     key=$1
     case $key in
-        -b|--bam_list)
+        -i|--input)
             bam_list=$2
             shift
             ;;
@@ -78,39 +78,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 # check required arg provided
-if [[ -z "${bam_list:-}" ]]; then
-    printf "\nERROR: --bam_list argument required\n"
+if [[ -z ${bam_list:-} ]]; then
+    printf "\nERROR: --input argument required\n"
     echo "$help_message"; exit 1
-else
-    IFS="," read -r -a bam_array <<< "$bam_list"
-    for bam in ${bam_array[@]}; do
-        if [[ $check = "yes" ]] && [[ -z $workdir/$bam ]]; then
-            printf "\nERROR: BAM file not readable: %s/%s\n" $workdir $bam
-            echo "$help_message"; exit 1
-        else
-            bam_base=$(basename "$bam")
-            bam_mdup_arg="${bam_mdup_arg:-}I=$bam_base "
-            bam_cp_arg="${bam_cp_arg:-}cp $workdir/$bam* .; "
-        fi
-    done
-    bam_cp_arg=${bam_cp_arg%;*}
-fi
-if [[ -z ${fasta:-} ]]; then
+elif [[ -z ${fasta:-} ]]; then
     printf "\nERROR: --fasta argument required\n"
     echo "$help_message"; exit 1
-else
-    if [[ $check = 'yes' ]] && [[ ! -r $workdir/$fasta ]]; then 
-        printf "\nERROR: BAM file not readable: %s/%s\n" $workdir $bam
+fi
+    
+# split bam list to array
+IFS="," read -r -a bam_array <<< "$bam_list"
+    
+# check files
+if [[ $check = 'y' ]]; then
+    if [[ ! -r $workdir/$fasta ]]; then 
+        printf "\nERROR: FASTA file not readable: %s/%s\n" $workdir $fasta
         echo "$help_message"; exit 1
-    else
-        fasta_prefix=${fasta%%.*}
-        fasta_base=$(basename "$fasta")
     fi
+    for bam in ${bam_array[@]}; do
+        if [[ ! -r $workdir/$bam ]]; then
+            printf "\nERROR: BAM file not readable: %s/%s\n" $workdir $bam
+            echo "$help_message"; exit 1
+        fi
+    done
 fi
 
+# get basenames/set merge inputs
+fasta_prefix=${fasta%%.*}
+fasta_base=$(basename "$fasta")
+for bam in ${bam_array[@]}; do
+    bam_base=$(basename "$bam")
+    bam_merge_arg="${bam_merge_arg:-}I=$bam_base "
+    bam_cp_arg="${bam_cp_arg:-}cp $workdir/$bam* .; "
+done
+bam_cp_arg=${bam_cp_arg%;*}
+
 # if no name provided extract from first bam
-if [[ -z "$name" ]]; then
-    name=${bam_array[0]%%.*}".merged"
+if [[ -z ${name:-} ]]; then
+    name=${bam_array[0]%%.*}
+    name=$(basename "$name")
 fi
 
 # set output directories
@@ -127,21 +133,34 @@ mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir
 
 # set commands
-merge_cmd=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MergeSamFiles"
-            "${megre_sam_input}"
-            "OUTPUT=${name}.merge.bam")
-mdup_cmd=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
-            "INPUT=${name}.bam"
-            "OUTPUT=${name}.mdup.bam" 
-            "METRICS_FILE=${name}.mark_dup_metrics.txt"
-            "CREATE_INDEX=true")
-mdup2_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
-                "$name.bam O=tmp M=$name.mark_duplicate_metrics CREATE_INDEX=true")
+merge_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MergeSamFiles"
+                "${bam_merge_arg}"
+                "OUTPUT=${name}.merge.bam")
+mdup_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
+                "INPUT=${name}.bam"
+                "OUTPUT=${name}.mdup.bam"
+                "METRICS_FILE=${name}.mark_duplicate_metrics"
+                "VALIDATION_STRINGENCY=SILENT"
+                "OPTICAL_DUPLICATE_PIXEL_DISTANCE=2500")
+sort_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar SortSam"
+                "INPUT=${name}.mdup.bam"
+                "OUTPUT=${name}.sorted.bam"
+                "SORT_ORDER=coordinate"
+                "CREATE_INDEX=false"
+                "CREATE_MD5_FILE=false")
+fixtags_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar SetNmAndUqTags"
+                "INPUT=${name}.sorted.bam"
+                "OUTPUT=${name}.bam"
+                "REFERENCE_SEQUENCE=${fasta_base}"
+                "CREATE_INDEX=true"
+                "CREATE_MD5_FILE=true")
 casm_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
-                "R=$fasta_base I=$name.bam O=$name.alignment_summary_metrics")
+                "R=${fasta_base}"
+                "I=${name}.bam"
+                "O=${name}.alignment_summary_metrics")
 
 # set log file names
-scr_name=${scr_name%.*}
+scr_name=$(basename "$0" .sh)
 std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$workdir/$logdir/$name.$scr_name.out.log
@@ -170,17 +189,24 @@ script=$(cat <<- EOS
 
 		# merge & mark dup
 		printf "\nMerging BAM and re-marking duplicates\n" &>> $out_log 
+		${merge_command[@]} &>> $out_log
+		mv ${name}.merge.bam ${name}.bam
 		${mdup_command[@]} &>> $out_log
-		cp $name.mark_duplicate_metrics $workdir/$qcdir/ &>> $out_log
+		cp ${name}.mark_duplicate_metrics $workdir/$qcdir &>> $out_log
+
+		# sort and fix tags
+		printf "\nSorting and fixing tags\n" &>> $out_log
+		${sort_command[@]} &>> $out_log
+		${fixtags_command[@]} &>> $out_log
 
 		# alignment metrics
 		printf "\nCollecting alignment metrics\n" >> $out_log
 		${casm_command[@]} &>> $out_log
-		cp $name.alignment_summary_metrics $workdir/$qcdir/ &>> $out_log
+		cp ${name}.alignment_summary_metrics $workdir/$qcdir &>> $out_log
 
 		# copy final bam to outdir
-		samtools index $name.bam &>> $out_log
-		cp $name.bam* $workdir/$outdir/ >> $out_log
+		cp ${name}.bam* $workdir/$outdir &>> $out_log
+		cp ${name}.bai $workdir/$outdir &>> $out_log
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
 		ls -lhAR &>> $out_log

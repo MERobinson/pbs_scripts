@@ -170,8 +170,8 @@ fi
 # call variants
 jobid=$(cat <<- EOS | qsub -N $name.var -
 		#!/usr/bin/env bash
-		#PBS -l walltime=10:00:00
-		#PBS -l select=1:mem=40gb:ncpus=1
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:mem=40gb:ncpus=8
 		#PBS -j oe
 		#PBS -q med-bio
 		#PBS -o $workdir/$logdir/$name.call_var_hc.$vcf_ext.log
@@ -179,8 +179,8 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 
 		# load modules
 		module load picard/2.6.0
-		module load gatk/3.6
-		module load java/jdk-8u66
+		module load gatk/3.7
+		module load java
 		module load samtools/1.2
 
 		# copy files to scratch
@@ -190,11 +190,12 @@ jobid=$(cat <<- EOS | qsub -N $name.var -
 		${dbsnp_cp:-}
 
 		# call
-		java -jar /apps/gatk/3.6/GenomeAnalysisTK.jar \
+		java -jar /apps/gatk/3.7/GenomeAnalysisTK.jar \
 			-T HaplotypeCaller \
 			-R $fasta \
 			-I $bam_base \
 			-o $name.hc.$vcf_ext \
+			-nct 1 \
 			${chr_arg:-} \
 			${gvcf_arg:-} \
 			${intervals_arg:-} \

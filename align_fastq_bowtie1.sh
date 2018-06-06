@@ -8,28 +8,25 @@ workdir=$PWD
 outdir=''
 check='yes'
 date=`date '+%Y-%m-%d %H:%M:%S'`
-scr_name=$(basename "$0")
 
 # help message
 help_message="
 
-Wrapper to align reads with BWA
+Wrapper to align reads with Bowtie
 
 usage:
-    bash $scr_name [-options] -fq1 <FASTQ>
+    bash $(basename "$0" .sh) [-options] -fq1 <FASTQ>
 purpose:
     # Align reads in FASTQ format with BWA and generate alignment metrics.
 required arguments:
     -fq1|--fastq1 : FASTQ filename of read 1 
-    --fasta : reference FASTA used in index generation
-    --index : BWA index prefix to align against 
+    -F|--fasta : reference FASTA used in index generation
+    -I|--index : BWA index prefix to align against 
 optional arguments:
     -fq2|--fastq2 : FASTQ filename of read 2 (if paired end)
+    -n|--name : name prefix for output files (default = FASTQ filename)
     -o|--outdir : output directory for bam files (default = PWD)
     -q|--qcdir : output directory for qc metrics (default = --outdir)
-    -l|--logdir : output directory for log files (default = --outdir)
-    -n|--name : name prefix for output files (default = FASTQ filename)
-    -e|--extend : bp extension for generating coverage track (default = 200)
     --check : whether to check input files [yes,no] (default = yes)
     --depend : list of PBS dependencies (default = NULL)
 bam header arguments:
@@ -44,10 +41,11 @@ bam header arguments:
     --pi : predicted median insert size (e.g. 200)
     --pm : platform model - further discription of platform
 additional info:
-    # qc/log output directories inherit from --outdir unless specified
+    # all paths shoulf be relative to working directory
+    # check and depend options used for job scheduling
+    # log/qc output directories inherit from --outdir unless specified
     # any of the bam header arguments provided will be included in the header
     # if platform is ILLUMINA - will automatically extract PU and ID from read name 
-    # check and depend args useful for jobs scheduling
 
 "
 
@@ -59,11 +57,11 @@ while [[ $# -gt 1 ]]; do
             fq1=$2
             shift
             ;;
-        --fasta)
+        -F|--fasta)
             fasta=$2
             shift
             ;;
-        --index)
+        -I|--index)
             index=$2
             shift
             ;;
@@ -136,7 +134,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         *)
-            echo "Error: Illegal argument: %s %s" $1 $2
+            printf "Error: Illegal argument: %s %s" $1 $2
             echo "$help_message"; exit 1
             ;;
     esac
@@ -179,16 +177,12 @@ fi
 if [[ -z "${qcdir:-}" ]]; then
     qcdir=$outdir
 fi
-if [[ -z "${trackdir:-}" ]]; then
-    trackdir=$outdir
-fi
 
 # create output dirs
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir/fastqc
 mkdir -p $workdir/$qcdir/metrics
-mkdir -p $workdir/$trackdir
 
 # set basenames
 fq1_base=$(basename "$fq1")
@@ -218,10 +212,10 @@ fi
 
 # extract read group info (if not provided)
 if [[ ${pl:-} = "PLATFORM=ILLUMINA" ]]; then
-    read_name=$(gzip -dc "$workdir/$fq1" | head -n 1)
-    fcid=$(echo $read_name | cut -d ":" -f 3) # flow cell ID
-    fcln=$(echo $read_name | cut -d ":" -f 4) # flow cell lane
-    ridx=$(echo $read_name | cut -d ":" -f 10) # barcode/index
+    IFS=":" read -r -a read_name <<< $(gzip -dc $fq1 | head -n 1)
+    fcid=${read_name[2]} # flow cell ID
+    fcln=${read_name[3]} # flow cell lane
+    ridx=$(echo ${read_name[9]} | grep -Eo "[CGAT]+") # barcode/index
     if [[ -z ${id:-} ]]; then id="READ_GROUP_NAME=$fcid.$fcln"; fi
     if [[ -z ${pu:-} ]]; then pu="PLATFORM_UNIT=$fcid.$fcln.$ridx"; fi
 fi

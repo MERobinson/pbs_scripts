@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-set -o errexit
 set -o pipefail
-set -o nounset
 
 # default arg
 workdir=$PWD
@@ -17,12 +15,12 @@ sm_idx=3
 fasta=genome.fa
 index=genome.fa
 log_file=$(basename $0 .sh)_$(date "+%Y-%m-%d").log
-verbose=n
+extract='no'
 
 # help message
 help_message="
 usage:
-    bash $(basename "$0") [wfrdg] -s <SAMPLE_INFO>
+    bash $(basename "$0") [-options] -i <sample_info.csv>
 purpose:
     # parse a sample info file and run ChIPseq analysis pipeline for each sample
     # by default, will map reads with BWA MEM, call peaks and generate metrics & tracks
@@ -36,6 +34,7 @@ optional arguments:
     -s|--scriptdir : directory within workdir containing pipeline scripts (default = scripts)
     -d|--delim : delimiter used in sample info file (default = ',')
     -g|--genome_size : genome size argument passed to macs (default = hs)
+    --extract : whether to extract ID and PU from read name [yes,no] (default = no)
 additional info:
     # sample info file must minimally contain FASTQ names and sample names
     # additional columns may be included as listed below:
@@ -52,6 +51,8 @@ additional info:
         - Run date [optional]
         - Predicted median insert size [optional] 
     # to include any of the above - provide column indexes (see column index arguments)
+    # read group ID and PU can be extracted from read names with '--extract yes' argument 
+      if read names are standard illumina format
     # NB: peak calling is ONLY conducted if control sample index (cs_idx) is provided,
           and corresponding field is not empty.
     # following resource files must be present in resdir:
@@ -108,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             genome_size=$2
             shift
             ;;
+        --extract)
+            extract=$2
+            shift
+            ;;
         -f1_idx)
             fq1_idx=$2
             shift
@@ -160,8 +165,12 @@ while [[ $# -gt 0 ]]; do
             fasta=$2
             shift
             ;;
+        --force)
+            force=$2
+            shift
+            ;;
         *) 
-            echo "Error: Illegal argument"
+            printf "\nError: Unrecognised argument: %s %s\n" $1 $2
             echo "$help_message"; exit 1
         ;;
     esac
@@ -185,7 +194,7 @@ if [[ !	-d "$workdir/$fqdir" ]]; then
     printf "\nERROR: FASTQ directory doesnt exist: %s/%s\n" $workdir $fqdir
     echo "$help_message"; exit 1
 fi
-if [[ !	-r "$workdir/$resdir/$index" ]]; then
+if [[ !	-e "$workdir/$resdir/$index.bwt" ]]; then
     printf "\nERROR: Index file doesnt exist/isnt readable: %s/%s/%s\n" $workdir $resdir $index
     echo "$help_message"; exit 1
 fi
@@ -199,7 +208,7 @@ mkdir -p $workdir/logs
 # function to extract fields from sample info file
 function extract_info {
 	awk -F $delim -v v1=$sm_idx -v v2=$sample_name -v v3=$1 \
-	'$v1 == v2 {print $v3}' $workdir/$sample_info
+	    '$v1 == v2 {print $v3}' $workdir/$sample_info
 }
 
 # function to list dependencies
@@ -219,100 +228,143 @@ printf "\t%s\n" ${samples[@]} >> $workdir/$logdir/$log_file
 # loop through sample names
 for sample_name in ${samples[@]}; do
 
+    echo "Processing $sample_name"
     printf "\nProcessing %s:\n" $sample_name >> $workdir/$logdir/$log_file
 
     # get all FASTQ files for current sample -> array
     fq1_array=($(extract_info $fq1_idx))
-    fq2_array=($(extract_info $fq2_idx))
 
     # do same for optional header info
-    if [[ ! -z "${id_idx:-}" ]]; then id_array=($(extract_info $id_idx)); fi
-    if [[ ! -z "${pu_idx:-}" ]]; then pu_array=($(extract_info $pu_idx)); fi
-    if [[ ! -z "${lb_idx:-}" ]]; then lb_array=($(extract_info $lb_idx)); fi
-    if [[ ! -z "${cn_idx:-}" ]]; then cn_array=($(extract_info $cn_idx)); fi
-    if [[ ! -z "${pl_idx:-}" ]]; then pl_array=($(extract_info $pl_idx)); fi
-    if [[ ! -z "${pi_idx:-}" ]]; then pi_array=($(extract_info $pi_idx)); fi
-    if [[ ! -z "${pm_idx:-}" ]]; then pm_array=($(extract_info $pm_idx)); fi
-    if [[ ! -z "${dt_idx:-}" ]]; then dt_array=($(extract_info $dt_idx)); fi
+    if [[ -n ${fq2_idx:-} ]]; then fq2_array=($(extract_info $fq2_idx)); fi
+    if [[ -n ${id_idx:-} ]]; then id_array=($(extract_info $id_idx)); fi
+    if [[ -n ${cn_idx:-} ]]; then cn_array=($(extract_info $cn_idx)); fi    
+    if [[ -n ${dt_idx:-} ]]; then dt_array=($(extract_info $dt_idx)); fi
+    if [[ -n ${pu_idx:-} ]]; then pu_array=($(extract_info $pu_idx)); fi
+    if [[ -n ${lb_idx:-} ]]; then lb_array=($(extract_info $lb_idx)); fi
+    if [[ -n ${pl_idx:-} ]]; then pl_array=($(extract_info $pl_idx)); fi
+    if [[ -n ${pi_idx:-} ]]; then pi_array=($(extract_info $pi_idx)); fi
+    if [[ -n ${pm_idx:-} ]]; then pm_array=($(extract_info $pm_idx)); fi
 
-    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $workdir/$logdir/$log_file
+    printf "\tNumber of runs/FASTQ detected: %s\n" ${#fq1_array[@]} >> $logdir/$log_file
 
     # loop through each FASTQ1
+    unset merge
+    unset depend
     for idx in ${!fq1_array[@]}; do
-	
+
+        # get basename
+        fq_name=$(basename ${fq1_array[$idx]})
+        fq_name=${fq_name%%.*}
+
+        # skip if exists
+        if [[ -e bam/$fq_name.bam ]]; then
+            merge="${merge:-},bam/$fq_name.bam"
+            continue
+        fi
+
+        # if flagged, extract info from read names
+        if [[ $extract_info = 'yes' ]]; then
+            readname=$(gzip -dc $fqdir/${fq1_array[$idx]} | head -n 1)
+            fcid=$(echo $readname | cut -d":" -f3) # flow cell id
+            fcln=$(echo $readname | cut -d":" -f4) # flow cell lane
+            bc=$(echo $readname | cut -d":" -f10) # barcode
+            rgid=$fcid.$fcln # read group ID
+            pu=$fcid.$fcln.$bc # platform unit
+        fi
+
         # assemble command for alignment script with any provided optional args
-        align="bash $workdir/$scriptdir/align_fastq_bwa.sh -f ${fq1_array[$idx]}"
-        align="${align} -n $sample_name.$idx --sm $sample_name"
-        
-        if [[ ! -z "${fq2_array[$idx]:-}" ]]; then align="${align} --mate ${fq2_array[$idx]} "; fi 
-        if [[ ! -z "${id_array[$idx]:-}" ]]; then align="${align} --id ${id_array[$idx]} "; fi
-        if [[ ! -z "${pu_array[$idx]:-}" ]]; then align="${align} --pu ${pu_array[$idx]} "; fi
-        if [[ ! -z "${lb_array[$idx]:-}" ]]; then align="${align} --lb ${lb_array[$idx]} "; fi
-       	if [[ ! -z "${cn_array[$idx]:-}" ]]; then align="${align} --cn ${cn_array[$idx]} "; fi
-       	if [[ ! -z "${pl_array[$idx]:-}" ]]; then align="${align} --pl ${pl_array[$idx]} "; fi
-       	if [[ ! -z "${pi_array[$idx]:-}" ]]; then align="${align} --pi ${pi_array[$idx]} "; fi
-       	if [[ ! -z "${pm_array[$idx]:-}" ]]; then align="${align} --pm ${pm_array[$idx]} "; fi
-        if [[ ! -z "${dt_array[$idx]:-}" ]]; then align="${align} --dt ${dt_array[$idx]} "; fi
+        align=("bash $scriptdir/align_fastq_bwa.sh" 
+               "-fq1 $fqdir/${fq1_array[$idx]} -n $fq_name --sm $sample_name"
+               "-F $resdir/$fasta -I $resdir/$index -o bam -l logs -q qc")
+
+        if [[ -n ${fq2_array[$idx]:-} ]]; then align+=("-fq2 $fqdir/${fq2_array[$idx]}"); fi 
+        if [[ -n ${lb_array[$idx]:-} ]]; then align+=("--lb ${lb_array[$idx]}"); fi
+       	if [[ -n ${cn_array[$idx]:-} ]]; then align+=("--cn ${cn_array[$idx]}"); fi
+       	if [[ -n ${pl_array[$idx]:-} ]]; then align+=("--pl ${pl_array[$idx]}"); fi
+       	if [[ -n ${pi_array[$idx]:-} ]]; then align+=("--pi ${pi_array[$idx]}"); fi
+       	if [[ -n ${pm_array[$idx]:-} ]]; then align+=("--pm ${pm_array[$idx]}"); fi
+        if [[ -n ${dt_array[$idx]:-} ]]; then align+=("--dt ${dt_array[$idx]}"); fi
+        if [[ -n ${pu_array[$idx]:-} ]]; then 
+            align+=("--pu ${pu_array[$idx]}")
+        elif [[ -n ${pu:-} ]]; then
+            align+=("--pu $pu")
+        fi
+        if [[ -n ${id_array[$idx]:-} ]]; then
+            align+=("--id ${id_array[$idx]}")
+        elif [[ -n ${rgid:-} ]]; then
+            align+=("--id $rgid")
+        fi
 	
 	    # run alignment script
-        printf "\tAligning FASTQ: %s with command:\n" $sample_name >> $logdir/$log_file
-        printf "\t\t%s %s \\ \n" $align >> $logdir/$log_file
-	    $align > tmp.log
+        printf "\tAligning FASTQ: %s with command:\n" ${fq_name} >> ${logdir}/${log_file}
+        printf "\t\t%s %s \\ \n" ${align[@]} >> ${logdir}/${log_file}
+	    ${align[@]} > tmp.log
        
         # check return value and add jobid/filename to merge input lists
         if [[ $? -ne 0 ]]; then
-            printf "\nERROR: alignment failed - %s\n" $sample_name
-            rm tmp.log
-            exit 1
-        elif [[ $idx = 0 ]]; then
-            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
-            merge_depend="afterok:${jobid}"
-            merge_list="$sample_name.$idx.bam"
+            printf "\nERROR: alignment failed for %s. STDERR output:\n" $sample_name
+            cat tmp.log; rm tmp.log; exit 1
         else
             jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
-            merge_depend="${merge_depend},afterok:${jobid}"
-            merge_list="${merge_list},$sample_name.$idx.bam"
+            depend="${depend:-},afterok:${jobid}"
+            merge="${merge:-},bam/${fq_name}.bam"
         fi
-        rm tmp.log
     done
 
-    # generate merge command
-    merge="bash $workdir/$scriptdir/merge_bam_picard.sh -i $merge_list"
-    merge="${merge} -n $sample_name --depend $merge_depend --validate no"
-    
-    # run merge
-    printf "\tMerging runs with command:\n" >> $logdir/$log_file
-    printf "\t\t%s %s \\ \n" $merge >> $logdir/$log_file
-    $merge > tmp.log
-
-    # check return/jobids
-    unset depend
-    if [[ $? -ne 0 ]]; then
-        printf "\nERROR: merge job failed - %s\n" $sample_name
-        rm tmp.log
-        exit 1
+    if [[ -e bam/$sample_name.bam ]]; then
+        :
     else
-        jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+        # remove leading commas
+        merge=${merge#*,}
+        if [[ -n ${depend:-} ]]; then depend="--depend ${depend#*,} --check no"; fi
+
+        # generate merge command
+        merge_cmd=("bash $scriptdir/merge_fixtags_picard.sh"
+                   "-i $merge -F $resdir/$fasta -o bam"
+                   "-n $sample_name -l logs -q qc/metrics ${depend:-}")
+    
+        # run merge
+        printf "\tMerging runs with command:\n" >> $logdir/$log_file
+        printf "\t\t%s %s \\ \n" ${merge_cmd[@]} >> $logdir/$log_file
+        ${merge_cmd[@]} > tmp.log
+
+        # check return/jobids
+        if [[ $? -ne 0 ]]; then
+            printf "\nERROR: merge job failed for %s. STDERR output:\n" $sample_name
+            cat tmp.log; rm tmp.log; exit 1
+        else
+            jobid=$(cat tmp.log | grep -Eo "^JOBID: [0-9]+.cx" | grep -Eo "[0-9]+")
+            depend="--depend afterok:$jobid"
+            macs_depend="${macs_depend:-},afterok:$jobid"
+        fi
     fi
-    macs_depend="${macs_depend:-},afterok:${jobid}"
-    rm tmp.log
 
-    # generate tracks
-    tracks="bash $workdir/$scriptdir/generate_track_deeptools.sh -i $sample_name.bam"
-    $tracks 
-
+    if [[ -e tracks/$sample_name.bedGraph ]]; then
+        :
+    else
+        # generate tracks
+        tracks_cmd=("bash $scriptdir/generate_track_deeptools.sh -b bam/$sample_name.bam"
+                    "-o tracks -F $resdir/$fasta -n $sample_name --logdir logs ${depend:-}")
+        printf "\tGenerating track with command:\n" >> $logdir/$log_file
+        printf "\t\t%s %s \\ \n" ${tracks_cmd[@]} >> $logdir/$log_file
+        ${tracks_cmd[@]} > tmp.log
+    fi
 done
-macs_depend=${macs_depend#*,}
+
+# check if dependencies
+if [[ -n ${macs_depend:-} ]]; then
+    macs_depend=${macs_depend#*,}
+    macs_depend="--depend ${macs_depend} --check no"
+fi
 
 # run peak calling if control samples index provided
-if [[ ! -z "${cs_idx:-}" ]]; then
+if [[ -n ${cs_idx:-} ]]; then
     printf "\nCalling peaks with MACS2:\n" >> $logdir/$log_file
-    
-    for sample_name in ${samples[@]}; do  
-        
+    for sample_name in ${samples[@]}; do
+
         # list control sample names
         cs_array=($(extract_info $cs_idx))
-        
+
         # check control field isnt empty
         if [[ -z "${cs_array:-}" ]]; then
             printf "\tWARNING: No control sample for sample %s" $sample_name >> $logdir/$log_file
@@ -325,21 +377,23 @@ if [[ ! -z "${cs_idx:-}" ]]; then
         
         # check only one control sample provided
         if [[ ${#cs_array[@]} -ne 1 ]]; then
-            printf "\tWARNING: multiple control sample names provided for sample %s:\n" $sample_name
-            printf "\t\t%s\n" ${cs_array[@]}
-            printf "\tWARNING: skipping peak calling"; continue
+            printf "\tWARNING: multiple control samples for %s:" $sample_name >> $logdir/$logfile
+            printf "\t\t%s\n" ${cs_array[@]} >> $logdir/$logfile
+            printf "\tWARNING: skipping peak calling" >> $logdir/$logfile
+            continue
         else
             cs_name=${cs_array[@]}
-        fi
-        
+        fi 
+
         # compile command
-        call="bash $workdir/$scriptdir/call_peaks_macs.sh -t $sample_name.bam -c $cs_name.bam"
-        call="${call} -g $genome_size -n $sample_name -e 200 -v no -d $macs_depend"
+        call_peaks=("bash $scriptdir/call_peaks_macs.sh -t bam/$sample_name.bam"
+                    "-c bam/$cs_name.bam -g $genome_size -n $sample_name"
+                    "-e 200 -F $resdir/$fasta -q qc -o peaks ${macs_depend:-}")
 
         # run macs script
-        printf "\tCommand for sample %s:\n" $sample_name >> $logdir/$log_file
-        printf "\t\t%s %s \\ \n" $call >> $logdir/$log_file
-        $call
+        printf "\tCalling peaks for sample %s with command:\n" $sample_name >> $logdir/$log_file
+        printf "\t\t%s %s \\ \n" ${call_peaks[@]} >> $logdir/$log_file
+        ${call_peaks[@]} > tmp.log
     done
 else
     printf "\nNo control sample index provided - skipping peak calling\n" >> $logdir/$log_file

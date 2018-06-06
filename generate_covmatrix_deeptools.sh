@@ -15,7 +15,7 @@ purpose:
     # Wrapper to run deeptools computeMatrix to generate a coverage matrix.
 required arguments:
     -b|--bigwig : comma separated list of bigwig files [bigWig]
-    -r|--regions : regions to copute coverage for [BED,GTF]
+    -r|--regions : regions to compute coverage for [BED,GTF]
     -m|--mode : runmode - [scale-regions,reference-point]
 optional arguments:
     -o|--outdir : output directory for track files (default = '.')
@@ -25,10 +25,13 @@ optional arguments:
     --downstream : bp downstream to include [integer] (default = 0)
     --skip_zeros : whether to skip zero score regions [yes,no] (default = no)
     --ref_point : feature site for reference-point [TSS,TES,center] (default = TSS) 
+    --depend : PBS dependencies to pass to job (default = NULL)
 additional info:
     # all paths should be relative to the current working directory
     # coverage can be calculated for a fixed region (reference-point) or scaled accross the
       entire region (scale-regions) mode
+    # multiple region files can be provided as comma separated list for grouped coverage
+    # dependencies should be in form 'afterok:123456,afterok:123457'
 
 "
 
@@ -76,6 +79,10 @@ while [[ $# -gt 1 ]]; do
             ref_point="--referencePoint $2"
             shift
             ;;
+        --depend)
+            depend="#PBS -W depend=$2"
+            shift
+            ;;
         *)
             echo "\nError: Illegal argument: %s %s" $1 $2
             echo "$help_message"; exit 1
@@ -102,6 +109,12 @@ fi
 IFS="," read -r -a bw_array <<< "$bw_list"
 IFS="," read -r -a rg_array <<< "$region_list"
 
+# set log filenames
+scr_name=$(basename "$0" .sh)
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
 # check files and add to arg
 bw_arg="-S"; rg_arg="-R"
 for bw in ${bw_array[@]}; do
@@ -123,11 +136,12 @@ for rg in ${rg_array[@]}; do
     fi
 done
 
-# strip leading sperators
-bw_cp=${bw_cp#*; }; rg_cp=${rg_cp#*; }
+# strip leading sperators & add log
+bw_cp="${bw_cp#*; } &>> $out_log"
+rg_cp="${rg_cp#*; } &>> $out_log"
 
 # if no name provided extract from BAM
-if [[ -z "$name" ]]; then
+if [[ -z ${name:-} ]]; then
     name=${bam%%.*}
 fi
 
@@ -135,39 +149,51 @@ fi
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
-# run job
-jobid=$(cat <<- EOS | qsub -N $name.covmat - 
+# set command
+cov_cmd=("computeMatrix ${mode} --numberOfProcessors 20 ${bw_arg} ${rg_arg}"
+         "-o $name.cov_matrix.gz --outFileSortedRegions $name.sorted_regions.bed"
+         "${upstream:-} ${downstream:-} ${ref_point:-} ${skip_zeros:-}")
+
+# write job script
+script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=02:00:00
+		#PBS -l walltime=24:00:00
 		#PBS -l select=1:mem=20gb:ncpus=20
 		#PBS -j oe
+		#PBS -N $name.covmat
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.generate_covmatrix_deeptools.log
+		#PBS -o $std_log
+		${depend:-}
 	
 		# load modules
 		module load samtools/1.2
 		module load anaconda/2.4.1
-		module load deeptools/2.4.2
-		source activate deeptools-2.4.2    
+		source activate my_deeptools-2.4.2    
+
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# copy resource files to scratch
 		${bw_cp:-}
 		${rg_cp:-}
 
 		# generate coverage track
-		computeMatrix ${mode} \
-			${bw_arg} \
-			${rg_arg} \
-			${upstream:-} \
-			${downstream:-} \
-			${ref_point:-} \
-			${skip_zeros:-} \
-			--numberOfProcessors 20 \
-			-o $name.cov_matrix.gz \
-			--outFileSortedRegions $name.sorted_regions.bed
+		${cov_cmd[@]} &>> $out_log
 
-		cp $name.cov_matrix.gz $workdir/$outdir/
-		cp $name.sorted_regions.bed $workdir/$outdir/
+		cp $name.cov_matrix.gz $workdir/$outdir/ &>> $out_log
+		cp $name.sorted_regions.bed $workdir/$outdir/ &>> $out_log
+
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhAR >> $out_log
+		
+		cp $out_log $workdir/$logdir/
 		ls -lhAR
 	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
+echo "JOBID: $jobid"
+exit 0
