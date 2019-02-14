@@ -6,8 +6,7 @@ set -o nounset
 # default arg
 workdir=$PWD
 outdir=''
-sradir='~/sradata/sra'
-date=`date '+%Y-%m-%d %H:%M:%S'`
+sradir="$HOME/sradata/sra"
 scr_name=$(basename "$0")
 
 # help message
@@ -99,7 +98,7 @@ out_log=$workdir/$logdir/$name.$scr_name.out.log
 script=$(cat <<- EOS
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=24gb:ncpus=1
+		#PBS -l select=1:mem=4gb:ncpus=1
 		#PBS -j oe
 		#PBS -N $name.sra
 		#PBS -q med-bio
@@ -120,12 +119,13 @@ script=$(cat <<- EOS
 
 		# dump
 		echo "Extracting FASTQ:" >> $out_log
-		cp $sradir/$sra.sra . &>> $out_log
+		cp -r $sradir/$sra.sra . &>> $out_log
 		fastq-dump -v -I -W -B --skip-technical --outdir . \
-			--gzip --split-files $sra.sra &>> $out_log
+			--origfmt --gzip --split-files $sra.sra &>> $out_log
 
 		# copy to outdir
-		cp $sra*.fastq.gz $workdir/$outdir/ &>> $out_log
+		rename $sra $name $sra*.fastq.gz
+		cp -r $name*.fastq.gz $workdir/$outdir/ &>> $out_log
 
 		ls -lhRA >> $out_log
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log

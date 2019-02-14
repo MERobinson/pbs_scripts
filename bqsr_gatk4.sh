@@ -19,9 +19,9 @@ required arguments:
     -i|--input : aligned & cleaned BAM file to recalibrate
     -F|--fasta : whole genome FASTA
     -I|--intervals : either a reference dict file or interval_list file
+optional arguments:
     -SNP|--dbsnp : dbsnp vcf
     -IND|--indels : vcf of known indels
-optional arguments:
     -n|--name : name prefix for output files (default = extracted from first bam)
     -o|--outdir : outut directory (default = PWD)
     -q|--qcdir : output directory for qc metrics (default = --outdir)
@@ -33,7 +33,6 @@ additional_info:
     # check and depend options useful for job scheduling
       e.g. --depend afterok:123456,afterok:123457
     # log/qc output directories inherit from outdir unless specified
-    # 
 
 "
 
@@ -103,12 +102,6 @@ elif [[ -z ${fasta:-} ]]; then
 elif [[ -z ${intervals:-} ]]; then
     printf "\nERROR: --intervals argument required\n"
     echo "$help_message"; exit 1
-elif [[ -z ${dbsnp:-} ]]; then
-	printf "\nERROR: --dbsnp argument required\n"
-	echo "$help_message"; exit 1
-elif [[ -z ${indels:-} ]]; then
-	printf "\nERROR: --indels argument required\n"
-	echo "$help_message"; exit 1
 fi 
     
 # check files
@@ -122,21 +115,31 @@ if [[ $check = 'y' ]]; then
     elif [[ ! -r $workdir/$intervals ]]; then
         printf "\nERROR: intervals file is not readable: %s/%s\n" $workdir $intervals
         echo "$help_message"; exit 1
-    elif [[ ! -r $workdir/$dbsnp ]]; then
-		printf "\nERROR: dbsnp file is not readable: %s/%s\n" $workdir $dbsnp
-		echo "$help_message"; exit 1
-	elif [[ ! -r $workdir/$indels ]]; then
-		printf "\nERROR: indels file is not readable: %s/%s\n" $workdir $indels
-		echo "$help_message"; exit 1
 	fi
 fi
 
-# get basenames/set merge inputs
+# get basenames
 fasta_prefix=${fasta%%.*}
 fasta_base=$(basename "$fasta")
 bam_base=$(basename "$bam")
-indels_base=$(basename "$indels")
-dbsnp_base=$(basename "$dbsnp")
+
+# deal with optional inputs
+if [[ -n ${dbsnp:-} ]]; then
+    if [[ $check = 'y' ]] && [[ ! -r $workdir/$dbsnp ]]; then
+        printf "\nERROR: dbsnp file is not readable: %s/%s\n" $workdir $dbsnp
+        echo "$help_message"; exit 1
+    fi
+    dbsnp_base=$(basename "$dbsnp")
+    dbsnp_cp="cp $workdir/$dbsnp* ."
+fi
+if [[ -n ${indels:-} ]]; then
+    if [[ $check = 'y' ]] && [[ ! -r $workdir/$indels ]]; then
+        printf "\nERROR: Indel file is not readable: %s/%s\n" $workdir $indels
+        echo "$help_message"; exit 1
+    fi
+    indels_base=$(basename "$indels")
+    indels_cp="cp $workdir/$indels* ."
+fi
 
 # if no name provided extract from first bam
 if [[ -z ${name:-} ]]; then
@@ -180,6 +183,8 @@ fi
 ## tmp - just scatter over standard chromosomes
 #chr_array=($(grep ^@SQ $intervals | cut -f 2 | grep -E "^SN:" | grep -Eo "chr[0-9MYX]{1,2}$"))
 
+printf "\nProcessing sample: %s\n" $name
+
 # run base recal report generation scattered over intervals
 for idx in ${!int_array[@]}; do
     
@@ -187,68 +192,75 @@ for idx in ${!int_array[@]}; do
     gather_input="${gather_input:-}-I=${name}.${idx}.recal_report "
 
 	# skip if exists
-	if [[ -r "${outdir}/${name}.${idx}.recal_report" ]]; then
-        continue
+	if [[ -r "${workdir}/${outdir}/${name}.${idx}.recal_report" ]]; then
+        printf "\tRecalibration report already exists: %s.%s.recal_report\n" $name $idx
+	else
+		# set intervals
+		intervals=${int_array[$idx]}
+
+		# set log file names
+		std_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.std.log"
+		pbs_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.pbs.log"
+		out_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.out.log"
+
+		# set cmd
+		recal_cmd=("JAVA_OPTS="-Xmx12G" gatk BaseRecalibrator"
+				   "-R ${fasta_base}"
+				   "-I ${bam_base}"
+				   "--use-original-qualities"
+				   "-O ${name}.${idx}.recal_report"
+				   "${intervals}")
+		if [[ -n ${dbsnp_base:-} ]]; then
+			recal_cmd+=("--known-sites ${dbsnp_base}")
+		fi
+		if [[ -n ${indel_base:-} ]]; then
+			recal_cmd+=("--known-sites ${indels_base}")
+		fi
+
+		# write job script
+		script=$(cat <<- EOS 
+				#!/bin/bash
+				#PBS -l walltime=24:00:00
+				#PBS -l select=1:mem=12gb:ncpus=1
+				#PBS -j oe
+				#PBS -N bqsr.${name}.${idx}
+				#PBS -q med-bio
+				#PBS -o ${std_log}
+				${depend:-}
+
+				printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+
+				# load modules
+				module load samtools/1.2
+				module load java/jdk-8u66
+				module load picard/2.6.0
+				module load gatk/4.0
+
+				# copy accross bam and fasta
+				cp -L $workdir/$fasta_prefix* . &>> $out_log
+				cp -L $workdir/$bam* . &>> $out_log
+				${indels_cp:-}
+				${dbsnp_cp:-}
+
+				# run bqsr
+				${recal_cmd[@]} &>> $out_log
+
+				# copy output back
+				cp ${name}.${idx}.recal_report* ${workdir}/${outdir} &>> $out_log
+
+				printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
+				ls -lhAR &>> $out_log
+				ls -lhAR
+			EOS
+		)
+		echo "$script" > $pbs_log
+
+		# submit job
+		jobid=$(qsub "$pbs_log")
+
+		# add to gather dependencies & input
+		gather_depend="${gather_depend:-},afterok:$jobid"
 	fi
-
-    # set intervals
-    intervals=${int_array[$idx]}
-
-	# set log file names
-	std_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.std.log"
-	pbs_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.pbs.log"
-	out_log="${workdir}/${logdir}/${name}.${idx}.recal_rep.out.log"
-
-	# write job script
-	script=$(cat <<- EOS 
-			#!/bin/bash
-			#PBS -l walltime=24:00:00
-			#PBS -l select=1:mem=12gb:ncpus=1
-			#PBS -j oe
-			#PBS -N bqsr.${name}.${idx}
-			#PBS -q med-bio
-			#PBS -o ${std_log}
-			${depend:-}
-
-			printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
-
-			# load modules
-			module load samtools/1.2
-			module load java/jdk-8u66
-			module load picard/2.6.0
-			module load gatk/4.0
-
-			# copy accross bam and fasta
-			cp -L $workdir/$fasta_prefix* . &>> $out_log
-			cp -L $workdir/$bam* . &>> $out_log
-			cp -L $workdir/$indels* . &>> $out_log
-			cp -L $workdir/$dbsnp* . &>> $out_log
-
-			# gen bqsr report
-			JAVA_OPTS="-Xmx12G" gatk BaseRecalibrator \
-				-R ${fasta_base} \
-				-I ${bam_base} \
-				${intervals} \
-				--use-original-qualities \
-				-O ${name}.${idx}.recal_report \
-				--known-sites ${dbsnp_base} \
-				--known-sites ${indels_base} &>> $out_log
-
-			# copy output back
-			cp ${name}.${idx}.recal_report* ${workdir}/${outdir} &>> $out_log
-
-			printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
-			ls -lhAR &>> $out_log
-			ls -lhAR
-		EOS
-	)
-	echo "$script" > $pbs_log
-
-	# submit job
-	jobid=$(qsub "$pbs_log")
-
-	# add to gather dependencies & input
-	gather_depend="${gather_depend:-},afterok:$jobid"
 done
 
 # remove leading delim
@@ -259,7 +271,7 @@ gather_cp=${gather_cp#*;}
 
 # gather recal reports
 if [[ -r "${workdir}/${outdir}/${name}.recal_report" ]]; then
-	:
+	printf "\tGathered recal report already exist: %s.recal.report\n" $name
 else
 	std_log="${workdir}/${logdir}/${name}.gather_recal_rep.std.log"
 	pbs_log="${workdir}/${logdir}/${name}.gather_recal_rep.pbs.log"
@@ -304,90 +316,91 @@ else
 fi
 
 # reset dependencies
-unset gather_depend
-unset gather_cp
+unset gather_bam_depend
+unset gather_bam_cp
+unset gather_bam_input
 
 # apply recal scattered over intervals
 for idx in ${!int_array[@]}; do
 
-    gather_cp="${gather_cp:-}; cp ${workdir}/${outdir}/${name}.${idx}.recal.bam* ."
-    gather_input="${gather_input:-}INPUT=${name}.${idx}.recal.bam "
+    gather_bam_cp="${gather_bam_cp:-}; cp ${workdir}/${outdir}/${name}.${idx}.recal.bam* ."
+    gather_bam_input="${gather_bam_input:-}INPUT=${name}.${idx}.recal.bam "
 
     # skip if exists
-    if [[ -r "${outdir}/${name}.${idx}.recal.bam" ]]; then
-        continue
-    fi
+    if [[ -r "${workdir}/${outdir}/${name}.${idx}.recal.bam" ]]; then
+        printf "\tRecalibrated BAM already exists: %s.%s.recal.bam\n" ${name} ${idx}
+    else
+        # set log file names
+        std_log="${workdir}/${logdir}/${name}.${idx}.recal.std.log"
+        pbs_log="${workdir}/${logdir}/${name}.${idx}.recal.pbs.log"
+        out_log="${workdir}/${logdir}/${name}.${idx}.recal.out.log"
 
-    # set log file names
-    std_log="${workdir}/${logdir}/${name}.${idx}.recal.std.log"
-    pbs_log="${workdir}/${logdir}/${name}.${idx}.recal.pbs.log"
-    out_log="${workdir}/${logdir}/${name}.${idx}.recal.out.log"
+        # set cmd
+        apply_bqsr=("JAVA_OPTS=\"-Xmx12G\" gatk ApplyBQSR"
+                    "-R ${fasta_base}"
+                    "-I ${bam_base}" 
+                    "${int_array[$idx]}" 
+                    "-O ${name}.${idx}.recal.bam" 
+                    "-bqsr ${name}.recal_report" 
+                    "--use-original-qualities" 
+                    "--emit-original-quals"
+                    "--create-output-bam-index" 
+                    "--create-output-bam-md5" 
+                    "--add-output-sam-program-record")
 
-    # set cmd
-    apply_bqsr=("JAVA_OPTS=\"-Xmx12G\" gatk ApplyBQSR"
-                "-R ${fasta_base}"
-                "-I ${bam_base}" 
-                "${int_array[$idx]}" 
-                "-O ${name}.${idx}.recal.bam" 
-                "-bqsr ${name}.recal_report" 
-                "--use-original-qualities" 
-                "--emit-original-quals"
-                "--create-output-bam-index" 
-                "--create-output-bam-md5" 
-                "--add-output-sam-program-record")
+		# write job script
+		script=$(cat <<- EOS 
+				#!/bin/bash
+				#PBS -l walltime=24:00:00
+				#PBS -l select=1:mem=12gb:ncpus=1
+				#PBS -j oe
+				#PBS -N apply.${name}.${idx}
+				#PBS -q med-bio
+				#PBS -o $std_log
+				${depend:-}
 
-    # write job script
-    script=$(cat <<- EOS 
-			#!/bin/bash
-			#PBS -l walltime=24:00:00
-			#PBS -l select=1:mem=12gb:ncpus=1
-			#PBS -j oe
-			#PBS -N apply.${name}.${idx}
-			#PBS -q med-bio
-			#PBS -o $std_log
-			${depend:-}
+				printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
-			printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
+				# load modules
+				module load samtools/1.2
+				module load java/jdk-8u66
+				module load picard/2.6.0
+				module load gatk/4.0
 
-			# load modules
-			module load samtools/1.2
-			module load java/jdk-8u66
-			module load picard/2.6.0
-			module load gatk/4.0
+				# copy accross bam and fasta
+				cp -L $workdir/$fasta_prefix* . &>> $out_log
+				cp -L $workdir/$bam* . &>> $out_log
+				cp -L $workdir/$outdir/${name}.recal_report . &>> $out_log
 
-			# copy accross bam and fasta
-			cp -L $workdir/$fasta_prefix* . &>> $out_log
-			cp -L $workdir/$bam* . &>> $out_log
-			cp -L $workdir/$outdir/${name}.recal_report . &>> $out_log
+				# gen bqsr report
+				${apply_bqsr[@]} &>> $out_log
 
-			# gen bqsr report
-			${apply_bqsr[@]} &>> $out_log
+				# copy output back
+				cp ${name}.${idx}.recal.bam* $workdir/$outdir &>> $out_log
 
-			# copy output back
-			cp ${name}.${idx}.recal.bam* $workdir/$outdir &>> $out_log
+				printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
+				ls -lhAR &>> $out_log
+				ls -lhAR
+			EOS
+		)
+		echo "$script" > $pbs_log
 
-			printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
-			ls -lhAR &>> $out_log
-			ls -lhAR
-		EOS
-	)
-    echo "$script" > $pbs_log
+		# submit job
+		jobid=$(qsub "$pbs_log")
 
-    # submit job
-    jobid=$(qsub "$pbs_log")
-
-    # add to gather dependencies & input
-    gather_depend="${gather_depend:-},afterok:$jobid"
+		# add to gather dependencies
+		gather_bam_depend="${gather_bam_depend:-},afterok:$jobid"
+	fi
 done
 
 # remove leading delim
-if [[ -n ${gather_depend:-} ]]; then
-    gather_depend="#PBS -W depend=${gather_depend#*,}"
+if [[ -n ${gather_bam_depend:-} ]]; then
+    gather_bam_depend="#PBS -W depend=${gather_bam_depend#*,}"
 fi
-gather_cp=${gather_cp#*;}
+gather_bam_cp=${gather_bam_cp#*;}
 
 # gather bam
-if [[ -r "${workdir}/${outdir}/${name}.recal_report" ]]; then
+if [[ -r "${workdir}/${outdir}/${name}.recal.bam" ]]; then
     echo "Final recalibrated bam already exists: %s/%s/%s" $workdir $outdir $name.recal.bam
 else
     std_log="${workdir}/${logdir}/${name}.gather_bam.std.log"
@@ -401,7 +414,7 @@ else
 			#PBS -N gather_bam_${name}
 			#PBS -q med-bio
 			#PBS -o $std_log
-			${gather_depend:-}
+			${gather_bam_depend:-}
 
 			printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
@@ -412,20 +425,17 @@ else
 			module load gatk/4.0
 
 			# copy reports to scratch
-			${gather_cp} &>> $out_log
+			${gather_bam_cp} &>> $out_log
 			cp $workdir/$bam* . &>> $out_log
 
 			# gen bqsr report
 			java -Xmx12G -jar /apps/picard/2.6.0/picard.jar GatherBamFiles \
-				${gather_input} \
-				INPUT=$bam_base \
-				OUTPUT=${name}.recal.bam \
-				CREATE_INDEX=true \
-				CREATE_MD5=true &>> $out_log
+				${gather_bam_input} \
+				OUTPUT=${name}.recal.bam &>> $out_log
+			samtools index ${name}.recal.bam &>> $out_log
 
 			# copy output back
 			cp ${name}.recal.bam* $workdir/$outdir &>> $out_log
-			cp ${name}.recal.bai $workdir/$outdir &>> $out_log
 
 			printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
 			ls -lhAR &>> $out_log

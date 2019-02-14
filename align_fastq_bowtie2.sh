@@ -6,27 +6,33 @@ set -o nounset
 workdir=$PWD
 outdir=''
 check='on'
-short='off'
+clip_act='X'
+multimap=4
+align_local='on'
+maxins='500'
 scr_name=$(basename "$0")
 
 # help message
 help_message="
-Wrapper to align reads with BWA
+Wrapper to align reads with Bowtie2
 
 usage:
-    bash $scr_name [-options] -fq1 <FASTQ>
+    bash $scr_name [-options] -fq1 <FASTQ> -I <INDEX> -F <FASTA>
 required arguments:
     -fq1|--fastq1 : FASTQ filename of read 1 
     -F|--fasta : reference FASTA used in index generation
     -I|--index : BWA index prefix to align against 
 optional arguments:
     -fq2|--fastq2 : FASTQ filename of read 2 (if paired end)
-    -s|--short : align in short read SE mode [on|off] (default = off)
     -n|--name : name prefix for output files (default = FASTQ filename)
     -o|--outdir : output directory for bam files (default = PWD)
     -q|--qcdir : output directory for qc metrics (default = --outdir)
     -l|--logdir : output directory for log files (default = --outdir)
-    --check : whether to check input files [on,off] (default = on)
+    -X|--maxins : maximum insert size [INT] (default = 500)
+    --clip_act : clipping action setting for Picard SamToFastq [N|X|INT] (default = X)
+    --multimap : number of multimappers to allow [INT] (default = 4)
+    --local : whether to aling in local mode [on|off] (default = on)
+    --check : whether to check input files [on|off] (default = on)
     --depend : list of PBS dependencies (default = NULL)
 bam header arguments:
     --sm : sample name (default = name)
@@ -68,10 +74,6 @@ while [[ $# -gt 1 ]]; do
             fq2=$2
             shift
             ;;
-        -s|--short)
-            short=$2
-            shift
-            ;;
         -o|--outdir)
             outdir=$2
             shift
@@ -88,8 +90,24 @@ while [[ $# -gt 1 ]]; do
             name=$2
             shift
             ;;
+        -X|--maxins)
+            maxins=$2
+            shift
+            ;;
+        --clip_act)
+            clip_act=$2
+            shift
+            ;;
         --check)
             check=$2
+            shift
+            ;;
+        --multimap)
+            multimap=$2
+            shift
+            ;;
+        --local)
+            align_local=$2
             shift
             ;;
         --depend)
@@ -163,7 +181,7 @@ if [[ "${check:-}" = on ]]; then
     elif [[ ! -r $fasta ]]; then
         printf "\nERROR: FASTA file cannot be read: %s/%s\n" $workdir $fasta
         echo "$help_message"; exit 1
-    elif [[ ! -e $index.bwt ]]; then
+    elif [[ ! -e $index.1.bt2 ]]; then
         printf "\nERROR: Index file does not exist: %s/%s\n" $workdir $index
         echo "$help_message"; exit 1
     fi
@@ -182,24 +200,23 @@ mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$qcdir
 
-# set basenames
-fq1_base=$(basename "$fq1")
-fasta_base=$(basename "$fasta")
-fasta_prefix=${fasta%.*}
-index_base=$(basename "$index")
-
-# set PE/SE arguments
-if [[ -n "${fq2:-}" ]]; then
-    fq2_cp="cp $workdir/$fq2 ."
-    fq2_base=$(basename "$fq2")
-    fq2_fq2sam="FASTQ2=$fq2_base"
-    fq2_bwamem="-p"
-fi
-
 # extract filename prefix if not provided
 if [[ -z "${name:-}" ]]; then
-    echo "WARNING: name not set, extracting from: $fq1_base"
-    name=${fq1_base%%.*}
+    name=$(basename $fq1)
+    name=${name%%.*}
+    echo "WARNING: name not set, extracted from FASTQ: $name"
+fi
+
+# set optional arguments
+if [[ -n "${fq2:-}" ]]; then
+    fq2_cp="cp -L ${workdir}/${fq2}* ."
+    fq2_fq2sam="FASTQ2=$(basename $fq2)"
+    bt_input="--interleaved ${name}.unaligned.fq"
+else
+    bt_input="-U ${name}.unaligned.fq"
+fi
+if [[ $align_local = 'on' ]]; then
+    local_arg="--local"
 fi
 
 # set sample name to name if not provided
@@ -218,62 +235,67 @@ if [[ ${pl:-} = "PLATFORM=ILLUMINA" ]]; then
 fi
 
 # set commands
-fastqc_command=("fastqc --noextract --dir tmp -o fastqc -t 20 ${fq1_base} ${fq2_base:-}")
-fq2sam_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar FastqToSam" 
-                "FASTQ=${fq1_base}" 
+picard_path="$HOME/anaconda3/envs/bowtie2/share/picard-2.18.26-0"
+fastqc_command=("fastqc --noextract --dir tmp -o fastqc -t 18"
+                "$(basename ${fq1}) $(basename ${fq2:-})")
+fq2sam_command=("java -Xmx32G -jar ${picard_path}/picard.jar FastqToSam" 
+                "FASTQ=$(basename ${fq1})" 
                 "OUTPUT=${name}.bam"
                 "TMP_DIR=tmp"
                 "${fq2_fq2sam:-} ${id:-} ${lb:-} ${pl:-}" 
                 "${pu:-} ${pm:-} ${cn:-} ${dt:-} ${pi:-} ${sm:-}")
-madapt_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MarkIlluminaAdapters"
+madapt_command=("java -Xmx32G -jar ${picard_path}/picard.jar MarkIlluminaAdapters"
                 "I=${name}.bam"
                 "O=${name}.madapt.bam"
                 "M=${name}.mark_adapters_metrics"
                 "TMP_DIR=tmp")
-sam2fq_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar SamToFastq"
+sam2fq_command=("java -Xmx32G -jar ${picard_path}/picard.jar SamToFastq"
                 "I=${name}.madapt.bam" 
                 "FASTQ=${name}.unaligned.fq" 
                 "CLIPPING_ATTRIBUTE=XT" 
-                "CLIPPING_ACTION=2" 
-                "INTERLEAVE=true" 
+                "CLIPPING_ACTION=${clip_act}" 
+                "CLIPPING_MIN_LENGTH=20"
+                "INTERLEAVE=true"
                 "NON_PF=true"
                 "TMP_DIR=tmp")
-if [[ $short = 'on' ]]; then
-    sai_command=("bwa aln ${index_base} ${name}.unaligned.fq > ${name}.unaligned.sai")
-    align_command=("bwa samse ${index_base} ${name}.unaligned.sai"
-                   "${name}.unaligned.fq > ${name}.aligned.sam")
-else
-    align_command=("bwa mem -M -t 20 ${fq2_bwamem:-} ${index_base}"
-                   "${name}.unaligned.fq > ${name}.aligned.sam")
-fi
-merge_command=("java -Xmx32G -jar /apps/picard/2.6.0/picard.jar MergeBamAlignment"
-                "R=${fasta_base}" 
+align_command=("bowtie2 ${pe_bt_arg:-} -k ${multimap} ${local_arg:-}"
+                "-X ${maxins} --threads 18" 
+                "-x $(basename ${index})" 
+                "${bt_input}"
+                "-S ${name}.aligned.sam")
+merge_command=("java -Xmx32G -jar ${picard_path}/picard.jar MergeBamAlignment"
+                "R=$(basename ${fasta})" 
                 "UNMAPPED_BAM=${name}.madapt.bam" 
-                "ALIGNED=${name}.aligned.sam"
+                "ALIGNED=${name}.aligned.sort.bam"
                 "O=${name}.bam"
                 "SORT_ORDER=coordinate"
                 "CREATE_INDEX=true"
                 "ADD_MATE_CIGAR=true"
-                "CLIP_ADAPTERS=false"
+                "CLIP_ADAPTERS=true"
                 "CLIP_OVERLAPPING_READS=true"
                 "INCLUDE_SECONDARY_ALIGNMENTS=true" 
                 "MAX_INSERTIONS_OR_DELETIONS=-1"
                 "PRIMARY_ALIGNMENT_STRATEGY=MostDistant" 
                 "ATTRIBUTES_TO_RETAIN=XS"
+                "MIN_UNCLIPPED_BASES=20"
+                "UNMAP_CONTAMINANT_READS=true"
                 "TMP_DIR=tmp")
-mdup_command=("/apps/sambamba/0.6.5/bin/sambamba_v0.6.5 markdup" 
-            	"--nthreads=20"
+mdup_command=("sambamba markdup" 
+            	"--nthreads=18"
             	"--tmpdir=tmp"
                 "${name}.bam ${name}.mdup.bam")
-alstat_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
-            	"R=${fasta_base}"
+alstat_command=("java -Xmx16g -jar ${picard_path}/picard.jar CollectAlignmentSummaryMetrics"
+            	"R=$(basename ${fasta})"
             	"I=${name}.bam"
             	"O=${name}.alignment_summary_metrics"
                 "TMP_DIR=tmp")
 
+# set fasta & index prefixes
+fa_prefix=${fasta%%.*}
+idx_prefix=${index%%.*}
 
 # set log file names
-scr_name=${scr_name%.*}
+scr_name=$(basename ${0} .sh)
 std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$workdir/$logdir/$name.$scr_name.out.log
@@ -282,7 +304,7 @@ out_log=$workdir/$logdir/$name.$scr_name.out.log
 script=$(cat <<- EOS 
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=32gb:ncpus=20
+		#PBS -l select=1:mem=24gb:ncpus=18
 		#PBS -j oe
 		#PBS -N $name.bwa
 		#PBS -q med-bio
@@ -290,21 +312,17 @@ script=$(cat <<- EOS
 		${depend:-}
 
 		# load modules
-		module load fastqc
-		module load samtools
-		module load java
-		module load picard
-		module load bio-bwa
-		module load sambamba
+		module load anaconda3/personal
+		source activate bowtie2
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 		
 		# copy resource files to scratch
 		mkdir -p fastqc &>> $out_log
 		mkdir -p tmp
-		cp -L $workdir/$index* . &>> $out_log
-		cp -L $workdir/$fasta_prefix* . &>> $out_log
-		cp $workdir/$fq1 . &>> $out_log
+		cp -L ${workdir}/${idx_prefix}* . &>> $out_log
+		cp -L ${workdir}/${fa_prefix}* . &>> $out_log
+		cp -L ${workdir}/${fq1}* . &>> $out_log
 		${fq2_cp:-}
 
 		# run fastqc
@@ -327,8 +345,9 @@ script=$(cat <<- EOS
 
 		# align to genome with bwa
 		printf "\nAligning to genome:\n" >> $out_log
-		${sai_command[@]:-}
-		${align_command[@]}
+		${align_command[@]} &>> $out_log
+
+		samtools sort -n -O bam -o ${name}.aligned.sort.bam ${name}.aligned.sam
 
 		# merge uBAM and aligned
 		printf "\nMerging aligned with uBAM:\n" >> $out_log
@@ -351,7 +370,7 @@ script=$(cat <<- EOS
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR &>> $out_log
 		ls -lhAR 
-		cp -r $out_log $workdir/$logdir/
+		#cp -r $out_log $workdir/$logdir/
         
 	EOS
 ) 

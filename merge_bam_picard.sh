@@ -89,7 +89,7 @@ else
             echo "$help_message"; exit 1
         else
             bam_base=$(basename "$bam")
-            bam_mdup_arg="${bam_mdup_arg:-}I=$bam_base "
+            merge_input="${merge_input:-}I=$bam_base "
             bam_cp_arg="${bam_cp_arg:-}cp $workdir/$bam* .; "
         fi
     done
@@ -128,17 +128,18 @@ mkdir -p $workdir/$qcdir
 
 # set commands
 merge_cmd=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MergeSamFiles"
-            "${megre_sam_input}"
-            "OUTPUT=${name}.merge.bam")
-mdup_cmd=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
-            "INPUT=${name}.bam"
-            "OUTPUT=${name}.mdup.bam" 
-            "METRICS_FILE=${name}.mark_dup_metrics.txt"
-            "CREATE_INDEX=true")
-mdup2_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar MarkDuplicates"
-                "$name.bam O=tmp M=$name.mark_duplicate_metrics CREATE_INDEX=true")
-casm_command=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
-                "R=$fasta_base I=$name.bam O=$name.alignment_summary_metrics")
+            "${merge_input}"
+            "OUTPUT=${name}.merge.bam"
+            "TMP_DIR=tmp")
+mdup_cmd=("/apps/sambamba/0.6.5/bin/sambamba_v0.6.5 markdup"
+            "--nthreads=20"
+            "--tmpdir=tmp"
+            "${name}.merge.bam ${name}.bam")
+casm_cmd=("java -Xmx16g -jar /apps/picard/2.6.0/picard.jar CollectAlignmentSummaryMetrics"
+            "R=${fasta_base}"
+            "I=${name}.bam"
+            "O=${name}.alignment_summary_metrics"
+            "TMP_DIR=tmp")
 
 # set log file names
 scr_name=${scr_name%.*}
@@ -163,24 +164,29 @@ script=$(cat <<- EOS
 		module load samtools/1.2
 		module load java/jdk-8u66
 		module load picard/2.6.0
+		module load sambamba
+		mkdir -p tmp
 
 		# copy accross bam and fasta
 		cp $workdir/$fasta_prefix* . &>> $out_log
 		$bam_cp_arg &>> $out_log
 
-		# merge & mark dup
-		printf "\nMerging BAM and re-marking duplicates\n" &>> $out_log 
-		${mdup_command[@]} &>> $out_log
-		cp $name.mark_duplicate_metrics $workdir/$qcdir/ &>> $out_log
+		# merge 
+		printf "\nMerging BAMs\n" &>> $out_log 
+		${merge_cmd[@]} &>> $out_log
+
+		# re-mark dups
+		printf "\nMarking duplicates for merged\n"
+		${mdup_cmd[@]}
 
 		# alignment metrics
-		printf "\nCollecting alignment metrics\n" >> $out_log
-		${casm_command[@]} &>> $out_log
-		cp $name.alignment_summary_metrics $workdir/$qcdir/ &>> $out_log
+		printf "\nCollecting alignment metrics for merged\n" >> $out_log
+		${casm_cmd[@]} &>> $out_log
+		cp -r $name.alignment_summary_metrics $workdir/$qcdir/ &>> $out_log
 
 		# copy final bam to outdir
 		samtools index $name.bam &>> $out_log
-		cp $name.bam* $workdir/$outdir/ >> $out_log
+		cp -r $name.bam* $workdir/$outdir/ >> $out_log
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` &>> $out_log
 		ls -lhAR &>> $out_log

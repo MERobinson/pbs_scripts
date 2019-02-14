@@ -135,6 +135,9 @@ if [[ -n ${genome:-} ]]; then
     genome_arg="--genome $genome"
 fi
 
+# load module
+module load sra-toolkit
+
 # create required dirs
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$outdir

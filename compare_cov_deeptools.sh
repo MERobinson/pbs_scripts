@@ -9,9 +9,9 @@ format='bigwig'
 outdir=''
 extend=200
 quality=10
-dedup=yes
+dedup='yes'
 binsize=200
-ratio='subtract'
+mode='log2'
 
 # help message
 help_message="
@@ -28,7 +28,7 @@ optional arguments:
     -l|--logdir : output directory for log files (default = --outdir)
     -n|--name : name prefix for output file (default = BAM filename)
     -f|--format : output format [bedgraph,bigwig] (default = bedgraph)
-    -r|--ratio : type of comparison [log2,ratio,subtract] (default = 'subtract')
+    -m|--mode : type of comparison [log2|ratio|subtract|mean] (default = 'log2')
     -g|--genome : genome version - used in trackline if provided (default = NULL)
     -e|--extend : bp extension for generating coverage track (default = 200)
     -q|--quality : min alignment quality to filter reads (default = 10)
@@ -70,8 +70,8 @@ while [[ $# -gt 1 ]]; do
             format=$2
             shift
             ;;
-        -r|--ratio)
-            ratio=$2
+        -m|--mode)
+            mode=$2
             shift
             ;;
         -g|--genome)
@@ -155,28 +155,36 @@ control_base=$(basename "$control_bam")
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
+# set log names
+scr_name=$(basename $0 .sh)
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
 # run job
-jobid=$(cat <<- EOS | qsub -N $name.track - 
+script=$(cat <<- EOS 
 		#!/bin/bash
-		#PBS -l walltime=02:00:00
+		#PBS -l walltime=24:00:00
 		#PBS -l select=1:mem=10gb:ncpus=20
 		#PBS -j oe
+		#PBS -N $name.track
 		#PBS -q med-bio
-		#PBS -o $workdir/$logdir/$name.compare_cov_deeptools.log
+		#PBS -o $std_log
 	
 		# load modules
 		module load samtools/1.2
-		module load anaconda/2.4.1
-		module load deeptools/2.4.2
-		source activate deeptools-2.4.2    
+		module load anaconda3/personal
+		source activate deeptools-3.1.0    
+
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# copy resource files to scratch
-		cp $workdir/$test_bam* .
-		cp $workdir/$control_bam* .
+		cp $workdir/$test_bam* . &>> $out_log
+		cp $workdir/$control_bam* . &>> $out_log
 
 		# filter bam prior to making track
-		samtools view -b $dedup_arg -q $quality $test_base $chr_list > $name.test.bam
-		samtools view -b $dedup_arg -q $quality $control_base $chr_list > $name.control.bam
+		samtools view -b ${dedup_arg:-} -q $quality $test_base $chr_list > $name.test.bam
+		samtools view -b ${dedup_arg:-} -q $quality $control_base $chr_list > $name.control.bam
 		samtools index $name.test.bam
 		samtools index $name.control.bam
 
@@ -184,16 +192,29 @@ jobid=$(cat <<- EOS | qsub -N $name.track -
 		bamCompare \
 			--bamfile1 $name.test.bam \
 			--bamfile2 $name.control.bam \
-			--ratio $ratio \
+			--operation $mode \
 			--extendReads $extend \
 			--binSize $binsize \
-			--normalizeUsingRPKM \
+			--scaleFactorsMethod readCount \
 			--ignoreForNormalization chrX \
 			--numberOfProcessors 20 \
 			--outFileFormat $format \
-			--outFileName $name.$extension
+			--outFileName $name.$extension &>> $out_log
 
-		mv $name.$extension $workdir/$outdir/
+		# copy output to outdir
+		cp $name.$extension $workdir/$outdir/
+
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
+		ls -lhAR &>> $out_log
 		ls -lhAR
+		cp $out_log $workdir/$logdir/
 	EOS
 )
+echo "$script" > $pbs_log
+
+# submit job
+jobid=$(qsub "$pbs_log")
+
+# echo job id and exit
+echo "JOBID: $jobid"
+exit 0

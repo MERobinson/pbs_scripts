@@ -1,4 +1,5 @@
 #!/bin/bash
+export LC_CTYPE=C
 
 if [[ -z $1 ]] || [[ -z $2 ]]; then
     echo "ERROR: input and output dir required"
@@ -17,8 +18,8 @@ else
     > $outdir/imgcodes.txt
 fi
 
-for f in $indir/*; do
-    code=$(echo $f | md5sum | cut -f1 -d' ').tiff
-    cp $f $outdir/$code
-    printf "%s\t%s\n" $f $outdir/$code > $outdir/imgcodes.txt
+for f in "$indir"/*.tif; do
+    code=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1).tif
+    cp "$f" "$outdir"/"$code"
+    printf "%s\t%s\n" "$f" "$outdir"/"$code" >> "$outdir"/imgcodes.txt
 done

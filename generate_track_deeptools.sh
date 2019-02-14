@@ -192,14 +192,14 @@ script=$(cat <<- EOS
 		cp $workdir/$bam* . &>> $out_log
 
 		# filter bam prior to making track
-		samtools view -b $dedup_arg -q $quality $bam_base $chr_list > $name.filt.bam
+		samtools view -b ${dedup_arg:-} -q $quality $bam_base $chr_list > $name.filt.bam
     	samtools index $name.filt.bam
 
 		# generate coverage track
 		${bamcov_command[@]} &>> $out_log
 
 		${format_arg:-}	
-		mv $name.$extension $workdir/$outdir/ &>> $out_log
+		cp -r $name.$extension $workdir/$outdir/ &>> $out_log
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR

@@ -4,6 +4,7 @@ set -o nounset
 
 # default args
 workdir=$PWD
+outdir=''
 check='on'
 length_correction='off'
 date=`date '+%Y-%m-%d %H:%M:%S'`
@@ -19,7 +20,7 @@ required args:
     -s|--seq : FASTA file of regions to analyse 
     -m|--motif : MEME formatted motif file
 optional args:
-    -c|--control : FASTA of control regions to compare against (default = NULL)
+    -c|--control : control regions to compare against [NULL|FASTA|--shuffle--] (default = NULL)
     --method : test to use [fisher|ranksum|mhg|4dmhg|spearman|linreg] (defualt = fisher)
     --scoring : scoring method [avg|max|sum|totalhits] (default = totalhits)
     --length-correction : whether to correct for length bias [on|off] (default = off)
@@ -101,9 +102,6 @@ if [[ $check = 'on' ]]; then
     elif [[ ! -r $motif ]]; then
         printf "\nERROR: input motif file cannot be read: %s/%s\n" $workdir $motif
         echo "$help_message"; exit 1
-    elif [[ -n ${control:-} ]] && [[ ! -r ${control:-} ]]; then
-        printf "\nERROR: input control FASTA cannot be read: %s/%s\n" $workdir $control
-        echo "$help_message"; exit 1
     fi
 fi
 
@@ -117,13 +115,22 @@ mkdir -p $workdir/$logdir
 # set name
 if [[ -z ${name:-} ]]; then
     name=$(basename "$fasta")
-    name=${name%%.*}
+    name=${name%%.*}.ame
 fi
 
 # handle optional args
 if [[ -n ${control:-} ]]; then
-    control_arg="--control $(basename $control)"
-    control_cp="cp $workdir/$control ."
+    if [[ $control = '--shuffle--' ]]; then
+        control_arg="--control '--shuffle--'"
+    else
+        if [[ $check = 'on' ]] && [[ ! -r ${control:-} ]]; then
+            printf "\nERROR: input control FASTA cannot be read: %s/%s\n" $workdir $control
+            echo "$help_message"; exit 1
+        else
+            control_cp="cp $workdir/$control ."
+            control_arg="--control $(basename $control)"
+        fi
+    fi
 fi
 if [[ $length_correction = 'on' ]]; then
     correct="--length-correction"
@@ -152,7 +159,8 @@ script=$(cat <<- EOS
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
-		module load meme/4.12.0 &>> $out_log
+		module load anaconda3/personal &>> $out_log
+		source activate meme
 
 		cp $workdir/$fasta . &>> $out_log
 		cp $workdir/$motif . &>> $out_log
@@ -161,7 +169,8 @@ script=$(cat <<- EOS
 		${ame_cmd[@]} &>> $out_log
 
 		cp tmp/ame.html $workdir/$outdir/$name.html &>> $out_log
-		cp tmp/ame.txt $workdir/$outdir/$name.txt &>> $out_log
+		cp tmp/ame.tsv $workdir/$outdir/$name.tsv &>> $out_log
+		cp tmp/sequences.tsv $workdir/$outdir/${name}_seq.tsv &>> $out_log
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR &>> $out_log

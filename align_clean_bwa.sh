@@ -318,7 +318,7 @@ script=$(cat <<- EOS
 		printf "\nConverting to FASTQ:\n" >> $out_log
 		${sam2fq_command[@]} &>> $out_log
 
-		# align to genome with Bowtie1
+		# align to genome with bwa
 		printf "\nAligning to genome:\n" >> $out_log
 		${align_command[@]}
 

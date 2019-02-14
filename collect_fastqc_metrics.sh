@@ -77,9 +77,9 @@ fi
 
 # set arguments
 for fastq in ${fastq_array[@]}; do
-    fastq_base=$(basename $fastq)
-    cp_arg="${fastq_arg:-}cp $workdir/$fastq .;"
-    fq_arg="${fq_arg:-}$fastq_base "
+    fq_base=$(basename "${fastq}")
+    cp_arg="${cp_arg:-}cp ${workdir}/${fastq} .; "
+    fq_arg="${fq_arg:-}${fq_base} "
 done 
 
 scr_name=$(basename "$0" .sh)
@@ -88,10 +88,11 @@ scr_name=$(basename "$0" .sh)
 jobid=$(cat <<- EOS | qsub -N $scr_name -
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:ncpus=8:mem=8gb
+		#PBS -l select=1:ncpus=12:mem=8gb
 		#PBS -j oe
 		#PBS -q med-bio
 		${depend:-}
+		mkdir -p tmp
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
@@ -102,10 +103,10 @@ jobid=$(cat <<- EOS | qsub -N $scr_name -
 		$cp_arg
 
 		# run
-		fastqc --noextract -t 8 $fq_arg
+		fastqc --noextract -t 12 --dir tmp $fq_arg
 
 		# copy metrics to outdir
-		cp *fastqc.zip $workdir/$outdir/
+		cp -r *fastqc.zip $workdir/$outdir/
 		
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 	EOS

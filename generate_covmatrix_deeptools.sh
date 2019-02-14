@@ -25,6 +25,7 @@ optional arguments:
     --downstream : bp downstream to include [integer] (default = 0)
     --skip_zeros : whether to skip zero score regions [yes,no] (default = no)
     --ref_point : feature site for reference-point [TSS,TES,center] (default = TSS) 
+    --sample_labels : comma sep list of labels matching samples (default = NULL)
     --depend : PBS dependencies to pass to job (default = NULL)
 additional info:
     # all paths should be relative to the current working directory
@@ -79,6 +80,10 @@ while [[ $# -gt 1 ]]; do
             ref_point="--referencePoint $2"
             shift
             ;;
+        --sample_labels)
+            sample_labels="$2"
+            shift
+            ;;
         --depend)
             depend="#PBS -W depend=$2"
             shift
@@ -101,19 +106,13 @@ if [[ -z ${bw_list:-} ]]; then
     printf "\nERROR: no BAM file provided\n"
     echo "$help_message"; exit 1
 elif [[ -z ${region_list:-} ]]; then
-    printf "\nERROR: no FASTA file provided\n"
+    printf "\nERROR: no regions provided\n"
     echo "$help_message"; exit 1
 fi
 
 # split lists
 IFS="," read -r -a bw_array <<< "$bw_list"
 IFS="," read -r -a rg_array <<< "$region_list"
-
-# set log filenames
-scr_name=$(basename "$0" .sh)
-std_log=$workdir/$logdir/$name.$scr_name.std.log
-pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
-out_log=$name.$scr_name.out.log
 
 # check files and add to arg
 bw_arg="-S"; rg_arg="-R"
@@ -136,23 +135,36 @@ for rg in ${rg_array[@]}; do
     fi
 done
 
-# strip leading sperators & add log
-bw_cp="${bw_cp#*; } &>> $out_log"
-rg_cp="${rg_cp#*; } &>> $out_log"
-
 # if no name provided extract from BAM
 if [[ -z ${name:-} ]]; then
-    name=${bam%%.*}
+    name=$(basename ${bw_array[0]})
+    name=${name%%.*}.cov
+fi
+
+# sort labels if provided
+if [[ -n ${sample_labels:-} ]]; then
+    IFS="," read -r -a lab_array <<< "$sample_labels"
+    lab_arg="--samplesLabel ${lab_array[@]}"
+else
+    lab_arg="--smartLabels"
 fi
 
 # create required dirs
 mkdir -p $workdir/$outdir
 mkdir -p $workdir/$logdir
 
-# set command
+# set log filenames
+scr_name=$(basename "$0" .sh)
+std_log=$workdir/$logdir/$name.$scr_name.std.log
+pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
+out_log=$name.$scr_name.out.log
+
+# set commands
+bw_cp="${bw_cp#*; } &>> $out_log"
+rg_cp="${rg_cp#*; } &>> $out_log"
 cov_cmd=("computeMatrix ${mode} --numberOfProcessors 20 ${bw_arg} ${rg_arg}"
          "-o $name.cov_matrix.gz --outFileSortedRegions $name.sorted_regions.bed"
-         "${upstream:-} ${downstream:-} ${ref_point:-} ${skip_zeros:-}")
+         "${upstream:-} ${downstream:-} ${ref_point:-} ${skip_zeros:-} ${lab_arg:-}")
 
 # write job script
 script=$(cat <<- EOS
@@ -167,8 +179,8 @@ script=$(cat <<- EOS
 	
 		# load modules
 		module load samtools/1.2
-		module load anaconda/2.4.1
-		source activate my_deeptools-2.4.2    
+		module load anaconda3/personal
+		source activate deeptools-3.1.0
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 

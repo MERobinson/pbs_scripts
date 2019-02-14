@@ -17,6 +17,8 @@ usage:
 required arguments:
     -b|--bam : BAM file to analyse
     -F|--fasta : reference FASTA
+    -BI|--bait_intervals : bait intervals file
+    -TI|--target_intervals : targets interval file
 optional arguments:
     -o|--outdir : output directory for metric files (default = pwd)
     -l|--logdir : output directory for log files (default = --outdir)
@@ -39,6 +41,14 @@ while [[ $# -gt 1 ]]; do
             ;;
 		-F|--fasta)
             fasta=$2
+            shift
+            ;;
+        -BI|--bait_intervals)
+            bait_intervals=$2
+            shift
+            ;;
+        -TI|--target_intervals)
+            target_intervals=$2
             shift
             ;;
 		-o|--outdir)
@@ -76,44 +86,55 @@ fi
 mkdir -p $workdir/$logdir
 mkdir -p $workdir/$outdir
 
-# check BAM arg and split
+# check req arg
 if [[ -z ${bam:-} ]]; then
 	printf "\nERROR: --bam argument required\n"
 	echo "$help_message"; exit 1
-elif [[ -z ${fasta:-} ]]; then
-    printf "\nERROR: --fasta argument required\n"
+elif [[ -z ${bait_intervals:-} ]]; then
+    printf "\nERROR: --bait_intervals argument required\n"
+    echo "$help_message"; exit 1
+elif [[ -z ${target_intervals:-} ]]; then
+    printf "\nERROR: --target_intervals argument required\n"
     echo "$help_message"; exit 1
 fi
 if [[ ${check:-} = yes ]]; then
     if [[ ! -r ${workdir}/${bam} ]]; then
         printf "\nERROR: BAM file is not readable: %s/%s\n" $workdir $bam
         echo "$help_message"; exit 1
-    elif [[ ! -r ${workdir}/${fasta} ]]; then
+    elif [[ ! -r ${workdir}/${bait_intervals} ]]; then
+        printf "\nERROR: Bait intervals file is not readable: %s/%s\n" $workdir $bait_intervals
+        echo "$help_message"; exit 1
+    elif [[ ! -r ${workdir}/${target_intervals} ]]; then
+        printf "\nERROR: Target intervals file is not readable: %s/%s\n" $workdir $target_intervals
+        echo "$help_message"; exit 1
+    elif [[ -n ${fasta:-} ]] && [[ ! -r ${workdir}/${fasta:-} ]]; then
         printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
         echo "$help_message"; exit 1
     fi
 fi
 
-# set basenames
-bam_base=$(basename "$bam")
-fasta_base=$(basename "$fasta")
-fasta_prefix=${fasta%%.*}
-
 # set name if not given
 if [[ -z ${name:-} ]]; then
-    name=${bam_base%%.*}
+    name=$(basename ${bam})
+    name=${name%%.*}
 fi
-
-# set commands
-picard_command=("java -Xmx16G -jar /apps/picard/2.6.0/picard.jar"
-                "CollectAlignmentSummaryMetrics R=$fasta_base"
-                "I=$bam_base O=$name.alignment_summary_metrics")
 
 # set log file names
 scr_name=$(basename "$0" .sh)
 std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$name.$scr_name.out.log
+
+# set commands
+hs_cmd=("java -Xmx16G -jar /apps/picard/2.6.0/picard.jar CollectHsMetrics"
+        "I=$(basename ${bam})"
+        "O=${name}.hs_metrics"
+        "TARGET_INTERVALS=$(basename ${target_intervals})"
+        "BAIT_INTERVALS=$(basename ${bait_intervals})")
+if [[ -n ${fasta:-} ]]; then
+    hs_cmd+=("R=$(basename ${fasta})")
+    fasta_cp="cp $workdir/${fasta%.*}* . &>> $out_log"
+fi
 
 # run job
 script=$(cat <<- EOS
@@ -122,7 +143,7 @@ script=$(cat <<- EOS
 		#PBS -l select=1:ncpus=1:mem=16gb
 		#PBS -j oe
 		#PBS -q med-bio
-		#PBS -N $name.AS_metrics
+		#PBS -N HS_met_$name
 		#PBS -o $std_log
 		${depend:-}
 
@@ -134,18 +155,20 @@ script=$(cat <<- EOS
 		module load samtools/1.2 &>> $out_log
 	
 		# copy to scratch
-		cp -rL $workdir/$fasta_prefix* . &>> $out_log
-		cp $workdir/$bam* . &>> $out_log
+		cp -r $workdir/$bam* . &>> $out_log
+		cp -r $workdir/$bait_intervals . &>> $out_log
+		cp -r $workdir/$target_intervals . &>> $out_log
+		${fasta_cp:-}
 
 		# run
-		printf "\nCollecting alignment summary metrics:\n" >> $out_log
-		${picard_command[@]} &>> $out_log
+		printf "\nCollecting HS metrics:\n" >> $out_log
+		${hs_cmd[@]} &>> $out_log
 
 		# copy metrics to outdir
-		cp $name.alignment_summary_metrics $workdir/$outdir/ &>> $out_log
+		cp $name.hs_metrics $workdir/$outdir/ &>> $out_log
 		
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
-		ls -lhAR &>> $out_log
+		ls -lhAR >> $out_log
 		ls -lhAR
 		cp $out_log $workdir/$logdir/
 	EOS

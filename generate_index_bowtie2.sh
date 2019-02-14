@@ -9,10 +9,10 @@ outdir=''
 # help message
 help_message="
 
-Simple wrapper to run BWA index
+Simple wrapper to build Bowtie2 index with bowtie2-build
 
 usage:
-    bash $(basename "$0") [-wrfgh]
+    bash $(basename "$0") [-options] -F <FASTA>
 required arguments:
     -f|--fasta : path to input fasta to index
 optional arguments:
@@ -69,7 +69,7 @@ if [[ -z ${fasta:-} ]]; then
 fi
 
 # check res files exist
-if [[ ! -e ${workdir}/${fasta} ]]; then
+if [[ ! -r ${workdir}/${fasta} ]]; then
 	printf "\nERROR: Input fasta file does not exist: %s/%s\n" $workdir $fasta 
 	echo "$help_message"; exit 1
 fi
@@ -112,7 +112,7 @@ pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 script=$(cat <<- EOS 
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=6gb:ncpus=1
+		#PBS -l select=1:mem=24gb:ncpus=8
 		#PBS -j oe
 		#PBS -N bwa_index
 		#PBS -q med-bio
@@ -122,7 +122,7 @@ script=$(cat <<- EOS
 		module load samtools/1.2
 		module load java/jdk-8u66
 		module load picard/2.6.0
-		module load bio-bwa/0.7.15
+		module load bowtie2/2.2.9
 	
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
@@ -130,16 +130,17 @@ script=$(cat <<- EOS
 		cp -L ${workdir}/${fasta_prefix}* .
 
 		# create seq dict if req
-		${dict_cmd:-}
+		${dict_cmd[@]:-}
 
 		# create fasta index if req
-		${index_cmd:-}
+		${index_cmd[@]:-}
 
 		# create BWA index
-		bwa index -a bwtsw ${fasta_base} 
+		bowtie2-build --threads 8 ${fasta_base} $name 
 		
 		# copy index files to outdir
-		cp ${fasta_base}* $workdir
+		cp ${name}* $workdir/$outdir
+		cp ${fasta_base}* $workdir/$outdir
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 		ls -lhAR
