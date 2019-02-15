@@ -137,12 +137,13 @@ else
 fi
 
 # set commands
-blfilt_cmd=("bedtools intersect -v -a $(basename ${input})"
+chrfilt_cmd=("samtools view -q 20 -o ${name}.chrfilt.bam $(basename ${input}) ${chr_array[@]}")
+blfilt_cmd=("bedtools intersect -v -a ${name}.chrfilt.bam"
             "-b $(basename ${blacklist}) > ${name}.blfilt.bam")
-filt_cmd=("samtools view -F 1804 -u ${name}.blfilt.bam ${chr_array[@]} |"
-           "samtools sort -n -o ${name}.blfilt.dedup.bam -")
-fixmate_cmd=("samtools fixmate -r ${name}.blfilt.dedup.bam ${name}.filt.bam")
-flagstat_cmd=("samtools flagstat ${name}.filt.bam > ${name}.flagstats.txt")
+filt_cmd=("samtools view -F 1804 -u ${name}.blfilt.bam |"
+           "samtools sort -n -o ${name}.dedup.bam -")
+fixmate_cmd=("samtools fixmate -r ${name}.dedup.bam ${name}.filt.bam")
+flagstat_cmd=("samtools flagstat ${name}.filt.bam > ${name}.filt.flagstats.txt")
 bedpe_cmd=("bedtools bamtobed -bedpe -mate1 -i ${name}.filt.bam | gzip -nc > ${name}.bedpe.gz")
 bedtota_cmd=("zcat ${name}.bedpe.gz |"
              "awk 'BEGIN{OFS=\"\t\"}"
@@ -183,10 +184,9 @@ script=$(cat <<- EOS
 
 		# filter
 		echo "Filtering BAM"
+		${chrfilt_cmd[@]}
 		${blfilt_cmd[@]}
-		samtools index ${name}.blfilt.bam
 		${filt_cmd[@]}
-		samtools index ${name}.blfilt.dedeup.bam
 
 		# fix mate
 		echo "Fixing mates"

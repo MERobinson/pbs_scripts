@@ -210,7 +210,10 @@ fi
 # set optional arguments
 if [[ -n "${fq2:-}" ]]; then
     fq2_cp="cp -L ${workdir}/${fq2}* ."
-    fq2_fq2sam="FASTQ2=$(basename $fq2)"
+    fq2_trim_input="$(basename ${fq2})"
+    fq2_trim_out="-p ${name}.2.fastq"
+    fq2_adapt="-A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    fq2_fq2sam="FASTQ2=${name}.2.fastq"
     bt_input="--interleaved ${name}.unaligned.fq"
 else
     bt_input="-U ${name}.unaligned.fq"
@@ -238,8 +241,12 @@ fi
 picard_path="$HOME/anaconda3/envs/bowtie2/share/picard-2.18.26-0"
 fastqc_command=("fastqc --noextract --dir tmp -o fastqc -t 18"
                 "$(basename ${fq1}) $(basename ${fq2:-})")
+cutadapt_cmd=("cutadapt -m 15 -e 0.1"
+              "-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA ${fq2_adapt:-}"
+              "-o ${name}.1.fastq ${fq2_trim_out:-}"
+              "$(basename ${fq1}) ${fq2_trim_input:-}")
 fq2sam_command=("java -Xmx32G -jar ${picard_path}/picard.jar FastqToSam" 
-                "FASTQ=$(basename ${fq1})" 
+                "FASTQ=${name}.1.fastq" 
                 "OUTPUT=${name}.bam"
                 "TMP_DIR=tmp"
                 "${fq2_fq2sam:-} ${id:-} ${lb:-} ${pl:-}" 
@@ -271,7 +278,7 @@ merge_command=("java -Xmx32G -jar ${picard_path}/picard.jar MergeBamAlignment"
                 "SORT_ORDER=coordinate"
                 "CREATE_INDEX=true"
                 "ADD_MATE_CIGAR=true"
-                "CLIP_ADAPTERS=true"
+                "CLIP_ADAPTERS=false"
                 "CLIP_OVERLAPPING_READS=true"
                 "INCLUDE_SECONDARY_ALIGNMENTS=true" 
                 "MAX_INSERTIONS_OR_DELETIONS=-1"
@@ -329,6 +336,10 @@ script=$(cat <<- EOS
 		printf "\nRunning FASTQC:\n" >> $out_log 
 		${fastqc_command[@]} &>> $out_log
 		cp -r fastqc/*fastqc.zip $workdir/$qcdir
+
+		# trim adapters
+		printf "\nTrimming adapters:\n" >> $out_log
+		${cutadapt_cmd[@]} &>> $out_log
 
 		# covert fastq to ubam
 		printf "\nConverting to uBAM:\n" >> $out_log
