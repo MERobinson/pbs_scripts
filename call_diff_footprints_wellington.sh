@@ -9,16 +9,20 @@ check='on'
 
 # help message
 help_message="
-Wrapper to call footprints from DNase data with Wellington
+Wrapper to call differential footprints from DNase data with Wellington
 
 usage:
-    bash $(basename "$0") [-options] -r <BED> -b <BAM>
+    bash $(basename "$0") [-options] -r <BED> -b1 <BAM> -b2 <BAM>
 required arguments:
     -r|--regions : accessible regions to profile [BED]
-    -b|--bam : BAM files to find footprints in [BAM]
+    -t|--treatment : aligned reads for treatment/test [BAM]
+    -c|--control : aligned reads for control [BAM] 
 optional arguments:
-    -n|--name : output filename prefix (default = extracted from input file)
     -o|--outdir : output directory name (default = PWD)
+    -n|--name : name of comparison & outdir subfolder (default = <tname>_vs_<cname>)
+    -tn|--tname : treatment name (default = extracted from treatment)
+    -cn|--cname : control name (defailt = extracted from control)
+    --fdr : FDR cutoff (default = 0.01)
     --fdrlimit : minimum pval to consider sig for FDR (default = -20)
     --logdir : output directory for log files (default = --outdir)
     --check : whether to check input files [on,off] (default = on)
@@ -35,18 +39,34 @@ while [[ $# -gt 1 ]]; do
 		    regions=$2
 		    shift
 		    ;;
-		-b|--bam)
-		    bam=$2
+		-t|--treatment)
+		    treatment=$2
 		    shift
 		    ;;
+        -c|--control)
+            control=$2
+            shift
+            ;;
 		-o|--outdir)
 		    outdir=$2
 		    shift
 		    ;;
-		-n|--name)
-		    name=$2
+        -n|--name)
+            name=$2
+            shift
+            ;;
+		-tn|--tname)
+		    tname=$2
 		    shift
 		    ;;
+        -cn|--cname)
+            cname=$2
+            shift
+            ;;
+        --fdr)
+            fdr="-fdr $2"
+            shift
+            ;;
         --fdrlimit)
             fdrlimit="-fdrlimit $2"
             shift
@@ -64,7 +84,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
 		*)
-		    echo "ERROR: Unrecognised argument: %s %s" $1 $2
+		    printf "ERROR: Unrecognised argument: %s %s" $1 $2
 		    echo "$help_message"; exit 1
 		    ;;
 	esac
@@ -75,15 +95,25 @@ done
 if [[ -z ${regions:-} ]]; then
     printf "\nERROR: --region argument required\n"
     echo "$help_message"; exit 1
-elif [[ -z ${bam:-} ]]; then
-    printf "\nERROR: --bam argument required\n"
+elif [[ -z ${treatment:-} ]]; then
+    printf "\nERROR: --treatment argument required\n"
+    echo "$help_message"; exit 1
+elif [[ -z ${control:-} ]]; then
+    printf "\nERROR: --control argument required\n"
     echo "$help_message"; exit 1
 fi
 
 # set optional args
+if [[ -z ${tname:-} ]]; then
+    tname=$(basename "${treatment}")
+    tname=${tname%%.*}
+fi
+if [[ -z ${cname:-} ]]; then
+    cname=$(basename ${control})
+    cname=${cname%%.*}
+fi
 if [[ -z ${name:-} ]]; then
-    name=$(basename "${bam}")
-    name=${name%%.*}
+    name="${tname}_vs_${cname}"
 fi
 if [[ -z ${logdir:-} ]]; then
     logdir=$outdir
@@ -93,20 +123,23 @@ mkdir -p $workdir/$logdir
 
 # check files
 if [[ ${check} = 'on' ]]; then
-    if [[ ! -r "${workdir}/${regions}" ]]; then
+    if [[ ! -r ${workdir}/${regions} ]]; then
         printf "\nERROR: input file cannot be read: %s/%s\n" $workdir $regions
         echo "$help_message"; exit 1
-    elif [[ ! -r "${workdir}/${bam}" ]]; then
-        printf "\nERROR: index cannot be read: %s/%s\n" $workdir $bam
+    elif [[ ! -r ${workdir}/${treatment} ]]; then
+        printf "\nERROR: bam file cannot be read: %s/%s\n" $workdir $treatment
+        echo "$help_message"; exit 1
+    elif [[ ! -r ${workdir}/${control} ]]; then
+        printf "\nERROR: bam file cannot be read: %s/%s\n" $workdir $control
         echo "$help_message"; exit 1
     fi
 fi
 
 # set commands
-pydnase_cmd=("wellington_footprints.py -A ${fdr_limit:-} -p 12" 
-             "-o ${name} preprocessed.bed ${name}.srt.bam ${name}")
-track_cmd=("dnase_wig_tracks.py -A preprocessed.bed ${name}.srt.bam"
-           "${name}_fw_cuts.wig ${name}_rv_cuts.wig")
+pydnase_cmd=("wellington_bootstrap.py -A ${fdr_limit:-} -p 12" 
+             "${tname}.srt.bam ${cname}.srt.bam preprocessed.bed"
+             "${name}/${tname}_specific_fp.txt"
+             "${name}/${cname}_specific_fp.txt")
 
 # set log file names
 scr_name=$(basename "$0" .sh)
@@ -117,8 +150,8 @@ out_log=$workdir/$logdir/$name.$scr_name.out.log
 # write job script
 script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=48:00:00
-		#PBS -l select=1:ncpus=12:mem=20gb
+		#PBS -l walltime=24:00:00
+		#PBS -l select=1:ncpus=12:mem=24gb
 		#PBS -j oe
 		#PBS -N fp.$name
 		#PBS -q med-bio
@@ -132,30 +165,27 @@ script=$(cat <<- EOS
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# copy input & index to scratch
-		cp -L ${workdir}/${bam}* .
+		cp -L ${workdir}/${treatment}* .
+		cp -L ${workdir}/${control}* .
 		cp -L ${workdir}/${regions}* .
-
-		# pre process bam
-		samtools sort -@ 12 -o ${name}.srt.bam $(basename $bam)
-		samtools index ${name}.srt.bam
 
 		# pre process bed
 		cut -f 1-3 $(basename $regions) > preprocessed.bed 
 
+		# pre process bam
+		samtools sort -@ 12 -o ${tname}.srt.bam $(basename ${treatment})
+		samtools index ${tname}.srt.bam
+		samtools sort -@ 12 -o ${cname}.srt.bam $(basename ${control})
+		samtools index ${cname}.srt.bam 
+
 		# run wellington
 		mkdir -p ${name}
 		${pydnase_cmd[@]} &>> $out_log
-		cp -r ${name}/* $workdir/$outdir/
+		cp -r ${name} $workdir/$outdir/
 
-		# gen tracks
-		${track_cmd[@]} &>> $out_log
-		cp ${name}_fw_cuts.wig $workdir/$outdir/
-		cp ${name}_rv_cuts.wig $workdir/$outdir/
-		
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR &>> $out_log
 		ls -lhAR 
-		cp -r $out_log $workdir/$logdir/
 	EOS
 )
 echo "$script" > $pbs_log

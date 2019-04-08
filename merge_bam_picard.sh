@@ -109,7 +109,7 @@ else
 fi
 
 # if no name provided extract from first bam
-if [[ -z "$name" ]]; then
+if [[ -z ${name:-} ]]; then
     name=${bam_array[0]%%.*}".merged"
 fi
 

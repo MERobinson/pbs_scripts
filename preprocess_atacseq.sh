@@ -125,48 +125,58 @@ fi
 
 # set chr list
 if [[ ${chrlist} = 'hs' ]]; then
-    chr_array=("chr1" "chr2" "chr3" "chr4" "chr5" "chr6" "chr7" "chr8" "chr10" 
-             "chr11" "chr12" "chr13" "chr14" "chr15" "chr16" "chr17" "chr18" 
-             "chr19" "chr20" "chr21" "chr22" "chrX" "chrY")
+    chr_array=("chr1" "chr2" "chr3" "chr4" "chr5" "chr6" "chr7" "chr8" "chr9" "chr10" 
+               "chr11" "chr12" "chr13" "chr14" "chr15" "chr16" "chr17" "chr18" 
+               "chr19" "chr20" "chr21" "chr22" "chrX" "chrY")
 elif [[ ${chrlist} = 'mm' ]]; then
-    chr_array=("chr1" "chr2" "chr3" "chr4" "chr5" "chr6" "chr7" "chr8" "chr10"
-             "chr11" "chr12" "chr13" "chr14" "chr15" "chr16" "chr17" "chr18"
-             "chr19" "chrX" "chrY")
+    chr_array=("chr1" "chr2" "chr3" "chr4" "chr5" "chr6" "chr7" "chr8" "chr9"
+               "chr10" "chr11" "chr12" "chr13" "chr14" "chr15" "chr16" "chr17" "chr18" "chr19"
+               "chrX" "chrY")
 else
     IFS=',' read -r -a chr_array <<< ${chrlist}
 fi
 
 # set commands
-chrfilt_cmd=("samtools view -q 20 -o ${name}.chrfilt.bam $(basename ${input}) ${chr_array[@]}")
+chrfilt_cmd=("samtools view -q 10 -o ${name}.chrfilt.bam $(basename ${input}) ${chr_array[@]}")
 blfilt_cmd=("bedtools intersect -v -a ${name}.chrfilt.bam"
             "-b $(basename ${blacklist}) > ${name}.blfilt.bam")
-filt_cmd=("samtools view -F 1804 -u ${name}.blfilt.bam |"
+filt_cmd=("samtools view -F 1548 -u ${name}.blfilt.bam |"
            "samtools sort -n -o ${name}.dedup.bam -")
-fixmate_cmd=("samtools fixmate -r ${name}.dedup.bam ${name}.filt.bam")
-flagstat_cmd=("samtools flagstat ${name}.filt.bam > ${name}.filt.flagstats.txt")
-bedpe_cmd=("bedtools bamtobed -bedpe -mate1 -i ${name}.filt.bam | gzip -nc > ${name}.bedpe.gz")
-bedtota_cmd=("zcat ${name}.bedpe.gz |"
+fixmate_cmd=("samtools fixmate -r ${name}.dedup.bam ${name}.fix.bam")
+bedpe_cmd=("bedtools bamtobed -bedpe -mate1 -i ${name}.fix.bam | gzip -nc > ${name}.bedpe.gz")
+shift_cmd=("zcat -f ${name}.bedpe.gz |"
+           "awk 'BEGIN {OFS = \"\t\"}"
+           "{if (\$9 == \"+\") {\$2 = \$2 + 4}"
+           "else if (\$9 == \"-\") {\$3 = \$3 - 5}"
+           "if (\$10 == \"+\") {\$5 = \$5 + 4}"
+           "else if (\$10 == \"-\") {\$6 = \$6 - 5} print \$0}' |"
+           "gzip -nc > ${name}.tn5.bedpe.gz")
+bedtota_cmd=("zcat ${name}.tn5.bedpe.gz |"
              "awk 'BEGIN{OFS=\"\t\"}"
              "{printf \"%s\t%s\t%s\tN\t1000\t%s\n%s\t%s\t%s\tN\t1000\t%s\n\","
              "\$1,\$2,\$3,\$9,\$4,\$5,\$6,\$10}' |"
-             "gzip -nc > ${name}.tagAlign.gz")
-shift_cmd=("zcat -f ${name}.tagAlign.gz |"
-           "awk 'BEGIN {OFS = \"\t\"}{if (\$6 == \"+\")"
-           "{\$2 = \$2 + 4} else if (\$6 == \"-\")"
-           "{\$3 = \$3 - 5} print \$0}' |"
-           "gzip -nc > ${name}.tn5.tagAlign.gz")
+             "gzip -nc > ${name}.tn5.tagAlign.gz")
+spr_cmd=("zcat ${name}.tn5.bedpe.gz |"
+         "shuf | split -d -l \${nlines} - ${name}.sub")
+spr1tota_cmd=("awk 'BEGIN{OFS=\"\t\"}"
+              "{printf \"%s\t%s\t%s\tN\t1000\t%s\n%s\t%s\t%s\tN\t1000\t%s\n\","
+              "\$1,\$2,\$3,\$9,\$4,\$5,\$6,\$10}' ${name}.sub00 |"
+              "gzip -nc > ${name}.sub1.tn5.tagAlign.gz")
+spr2tota_cmd=("awk 'BEGIN{OFS=\"\t\"}"
+              "{printf \"%s\t%s\t%s\tN\t1000\t%s\n%s\t%s\t%s\tN\t1000\t%s\n\","
+              "\$1,\$2,\$3,\$9,\$4,\$5,\$6,\$10}' ${name}.sub01 |"
+              "gzip -nc > ${name}.sub2.tn5.tagAlign.gz")
 
 # set log file names
 scr_name=$(basename ${0} .sh)
 std_log=$workdir/$logdir/$name.$scr_name.std.log
 pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
-out_log=$workdir/$logdir/$name.$scr_name.out.log
 
 # write job script
 script=$(cat <<- EOS 
 		#!/bin/bash
-		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=8gb:ncpus=1
+		#PBS -l walltime=48:00:00
+		#PBS -l select=1:mem=18gb:ncpus=1
 		#PBS -j oe
 		#PBS -N $name.atac
 		#PBS -o $std_log
@@ -191,28 +201,37 @@ script=$(cat <<- EOS
 		# fix mate
 		echo "Fixing mates"
 		${fixmate_cmd[@]}
-		samtools index ${name}.filt.bam
-		cp ${name}.filt.bam* $workdir/$outdir/
-
-		# stats
-		echo "Generating flagstats"
-		${flagstat_cmd[@]} 
-		cp ${name}.flagstats.txt $workdir/$qcdir/
 
 		# bedpe conversion
 		echo "Converting to BEDPE"
 		${bedpe_cmd[@]} 
-		cp ${name}.bedpe.gz $workdir/$outdir/
+
+		# tag shifting
+		echo "Tn5 shifting BEDPE reads"
+		${shift_cmd[@]}
+		cp ${name}.tn5.bedpe.gz $workdir/$outdir/
 
 		# tag conversion
-		echo "Converting filtered BED to tagAlign"
+		echo "Converting filtered, shifted BEDPE to tagAlign"
 		${bedtota_cmd[@]} 
-		cp ${name}.tagAlign.gz $workdir/$outdir/
+		cp ${name}.tn5.tagAlign.gz $workdir/$outdir/
 
-		# tn5 shifting
-		echo "Shifting tags" 
-		${shift_cmd[@]}
-		cp ${name}.tn5.tagAlign.gz $workdir/$outdir/ 
+		# subsampling bedpe
+		echo "Subsampling BEDPE to 2 SPR" 
+		nlines=\$(zcat ${name}.tn5.bedpe.gz | wc -l )
+		nlines=\$(( (nlines + 1) / 2 ))
+		${spr_cmd[@]}
+		${spr1tota_cmd[@]}
+		cp ${name}.sub1.tn5.tagAlign.gz $workdir/$outdir/  
+		${spr2tota_cmd[@]} 
+		cp ${name}.sub2.tn5.tagAlign.gz $workdir/$outdir/ 
+
+		# sort and index bam
+		samtools sort -o ${name}.filt.bam ${name}.fix.bam
+		samtools index ${name}.filt.bam
+		samtools flagstat ${name}.filt.bam > ${name}.filt.flagstats.txt
+		cp ${name}.filt.bam* $workdir/$outdir/
+		cp ${name}.filt.flagstats.txt $workdir/$qcdir/
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 		ls -lhAR 

@@ -7,10 +7,11 @@ set -o nounset
 workdir=$PWD
 format='bedgraph'
 outdir=''
-extend=200
+extend=100
 quality=10
 dedup=yes
-binsize=200
+binsize=100
+libtype='SE'
 check='yes'
 scr_name=$(basename "$0")
 
@@ -28,18 +29,23 @@ optional arguments:
     -l|--logdir : output directory for log files (default = --outdir)
     -n|--name : name prefix for output file (default = BAM filename)
     -f|--format : output format [bedgraph,bigwig] (default = bedgraph)
+    -t|--libtype : library type - paired or single [PE|SE] (default = SE)
+    -c|--center : whether to center reads [INT] (default = NULL)
     -g|--genome : genome version - used in trackline if provided (default = NULL)
-    -e|--extend : bp extension for generating coverage track (default = 200)
+    -e|--extend : bp extension for generating coverage track [INT] (default = 100)
     -q|--quality : min alignment quality to filter reads (default = 10)
                    (to disable simply set to 0)
     -d|--dedup : whether to filter duplicates [yes,no] (default = yes)
-    -s|--binsize : binning for track output (default = 200)
+    -s|--binsize : binning for track output (default = 100)
+    --smooth : window size for smoothing (default = NULL)
     --check : whether to check input files [yes,no] (default = yes)
     --depend : list of PBS dependencies (default = NULL) 
 additional info:
     # all paths should be relative to the current working directory
     # FASTA file is used to obtain a list of canonical chromosomes for filtering
       the BAM prior to generating tracks (regex for canonical = chr[0-9MXY]+)
+    # Note if --libtype PE is set, extension and center sizes is ignored and
+      actual isize from paired mappings used 
 
 "
 
@@ -61,6 +67,18 @@ while [[ $# -gt 1 ]]; do
             ;;
         -l|--logdir)
             logdir=$2
+            shift
+            ;;
+        -t|--libtype)
+            libtype=$2
+            shift
+            ;;
+        -c|--center)
+            center=$2
+            shift
+            ;;
+        --smooth)
+            smooth=$2
             shift
             ;;
         -f|--format)
@@ -129,9 +147,20 @@ if [[ -z "${name:-}" ]]; then
     name=${bam_base%%.*}
 fi
 
-# set dedup argument
+# set optional argument
 if [[ $dedup = yes ]]; then
     dedup_arg="-F 1024"
+fi
+if [[ ${libtype} = 'PE' ]]; then
+    ext_arg="--extendReads"
+else
+    ext_arg="--extendReads ${extend}"
+fi
+if [[ -n ${center:-} ]]; then
+    center_arg="--centerReads"
+fi
+if [[ -n ${smooth:-} ]]; then
+    smooth_arg="--smoothLength $smooth"
 fi
 
 # set format dependent arg
@@ -164,16 +193,16 @@ pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
 out_log=$workdir/$logdir/$name.$scr_name.out.log
 
 # compile commands
-bamcov_command=("bamCoverage --extendReads $extend --binSize $binsize"
-                "--normalizeUsingRPKM --ignoreForNormalization chrX"
-                "--numberOfProcessors 20 --outFileFormat $format"
-                "--bam $name.filt.bam --outFileName $name.$extension")
+bamcov_command=("bamCoverage ${ext_arg:-} ${center_arg:-} ${smooth_arg:-} --binSize ${binsize}"
+                "--normalizeUsing RPKM --ignoreForNormalization chrX chrM"
+                "--numberOfProcessors 12 --outFileFormat ${format}"
+                "--bam input.filt.bam --outFileName ${name}.${extension}")
 
 # run job
 script=$(cat <<- EOS 
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=10gb:ncpus=20
+		#PBS -l select=1:mem=8gb:ncpus=12
 		#PBS -j oe
 		#PBS -N $name.track
 		#PBS -q med-bio
@@ -183,17 +212,15 @@ script=$(cat <<- EOS
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 
 		# load modules
-		module load samtools/1.2
-		module load anaconda/2.4.1
-		module load deeptools/2.4.2
-		source activate deeptools-2.4.2    
+		module load anaconda3/personal
+		source activate deeptools
 
 		# copy resource files to scratch
-		cp $workdir/$bam* . &>> $out_log
+		cp ${workdir}/${bam%%.*}* . &>> $out_log
 
 		# filter bam prior to making track
-		samtools view -b ${dedup_arg:-} -q $quality $bam_base $chr_list > $name.filt.bam
-    	samtools index $name.filt.bam
+		samtools view -b ${dedup_arg:-} -q $quality $bam_base $chr_list > input.filt.bam
+		samtools index input.filt.bam
 
 		# generate coverage track
 		${bamcov_command[@]} &>> $out_log

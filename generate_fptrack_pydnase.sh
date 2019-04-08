@@ -111,7 +111,7 @@ out_log=$workdir/$logdir/$name.$scr_name.out.log
 
 # compile commands
 pydnase_cmd=("dnase_wig_tracks.py preprocessed.bed"
-             "$(basename ${bam}) ${name}_f.wig ${name}_r.wig")
+             "${name}.srt.bam ${name}_f.wig ${name}_r.wig")
 
 # run job
 script=$(cat <<- EOS 
@@ -128,10 +128,16 @@ script=$(cat <<- EOS
 
 		# load modules
 		module load anaconda3/personal
-		source activate pydnase    
+		source activate pydnase
+
+		# copy resource files to scratch
+        cp ${workdir}/${bam}* . &>> ${out_log}
+        cp ${workdir}/${regions}* . &>> ${out_log}
 
 		# preprocess bed
 		cut -f 1-3 $(basename $regions) > preprocessed.bed
+		samtools sort -o ${name}.srt.bam $(basename $bam)
+		samtools index ${name}.srt.bam
 
 		# copy resource files to scratch
 		cp ${workdir}/${bam}* . &>> ${out_log}
@@ -140,8 +146,13 @@ script=$(cat <<- EOS
 		# generate coverage track
 		${pydnase_cmd[@]} &>> ${out_log}
 
-		cp ${name}_f ${workdir}/${outdir}/ &>> ${out_log}
-		sp ${name}_r ${workdir}/${outdir}/ &>> ${out_log}
+		cp ${name}_f.wig ${workdir}/${outdir}/ &>> ${out_log}
+		cp ${name}_r.wig ${workdir}/${outdir}/ &>> ${out_log}
+
+		# temp
+		mv ${name}.srt.bam $(basename $bam)
+		mv ${name}.srt.bam.bai $(basename $bam).bai
+		cp $(basename $bam)* ${workdir}/${outdir}/
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> ${out_log}
 		ls -lhAR >> ${out_log}

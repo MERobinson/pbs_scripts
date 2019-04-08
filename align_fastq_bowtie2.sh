@@ -241,7 +241,7 @@ fi
 picard_path="$HOME/anaconda3/envs/bowtie2/share/picard-2.18.26-0"
 fastqc_command=("fastqc --noextract --dir tmp -o fastqc -t 18"
                 "$(basename ${fq1}) $(basename ${fq2:-})")
-cutadapt_cmd=("cutadapt -m 15 -e 0.1"
+cutadapt_cmd=("cutadapt --minimum-length 15 -e 0.1 --trim-n -j 12"
               "-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA ${fq2_adapt:-}"
               "-o ${name}.1.fastq ${fq2_trim_out:-}"
               "$(basename ${fq1}) ${fq2_trim_input:-}")
@@ -278,7 +278,7 @@ merge_command=("java -Xmx32G -jar ${picard_path}/picard.jar MergeBamAlignment"
                 "SORT_ORDER=coordinate"
                 "CREATE_INDEX=true"
                 "ADD_MATE_CIGAR=true"
-                "CLIP_ADAPTERS=false"
+                "CLIP_ADAPTERS=true"
                 "CLIP_OVERLAPPING_READS=true"
                 "INCLUDE_SECONDARY_ALIGNMENTS=true" 
                 "MAX_INSERTIONS_OR_DELETIONS=-1"
@@ -335,11 +335,12 @@ script=$(cat <<- EOS
 		# run fastqc
 		printf "\nRunning FASTQC:\n" >> $out_log 
 		${fastqc_command[@]} &>> $out_log
-		cp -r fastqc/*fastqc.zip $workdir/$qcdir
+		cp -r fastqc/*fastqc.zip $workdir/$qcdir/
 
 		# trim adapters
 		printf "\nTrimming adapters:\n" >> $out_log
-		${cutadapt_cmd[@]} &>> $out_log
+		${cutadapt_cmd[@]} 2>> $out_log 1> ${name}.cutadapt_metrics.txt
+		cp ${name}.cutadapt_metrics.txt $workdir/$qcdir/
 
 		# covert fastq to ubam
 		printf "\nConverting to uBAM:\n" >> $out_log
