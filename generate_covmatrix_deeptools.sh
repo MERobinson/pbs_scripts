@@ -180,7 +180,7 @@ script=$(cat <<- EOS
 		# load modules
 		module load samtools/1.2
 		module load anaconda3/personal
-		source activate deeptools-3.1.0
+		source activate deeptools
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
 

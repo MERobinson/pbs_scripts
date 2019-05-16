@@ -36,16 +36,16 @@ additional info:
 
 # parse command line arguments
 while [[ $# -gt 1 ]]; do
-	key=$1
-	case $key in
-		-r1|--reads1)
-		    r1=$2
-		    shift
-		    ;;
-		-i|--index)
-		    index=$2
-		    shift
-		    ;;
+    key=$1
+    case $key in
+        -r1|--reads1)
+            r1=$2
+            shift
+            ;;
+        -i|--index)
+            index=$2
+            shift
+            ;;
         -r2|--reads2)
             r2=$2
             shift
@@ -54,17 +54,17 @@ while [[ $# -gt 1 ]]; do
             mode=$2
             shift
             ;;
-		-o|--outdir)
-		    outdir=$2
-		    shift
-		    ;;
-		-n|--name)
-		    name=$2
-		    shift
-		    ;;
-		-l|--libtype)
-		    libtype=$2
-		    shift
+        -o|--outdir)
+            outdir=$2
+            shift
+            ;;
+        -n|--name)
+            name=$2
+            shift
+            ;;
+        -l|--libtype)
+            libtype=$2
+            shift
             ;;
         --logdir)
             logdir=$2
@@ -78,12 +78,12 @@ while [[ $# -gt 1 ]]; do
             depend="#PBS -W depend=$2"
             shift
             ;;
-		*)
-		    printf "\nERROR: Unrecognised argument: %s %s\n" $1 $2
-		    echo "$help_message"; exit 1
-		    ;;
-	esac
-	shift
+        *)
+            printf "\nERROR: Unrecognised argument: %s %s\n" $1 $2
+            echo "$help_message"; exit 1
+            ;;
+    esac
+    shift
 done
 
 # check required args

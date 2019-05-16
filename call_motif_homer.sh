@@ -22,6 +22,7 @@ required args:
 optional args:
     --size : frag size [INT|'given'] (default = 200)
     -bg|--background : background regions [BED] (default = NULL)
+    --mknown : known motif file to use in place of in-built DB (default = NULL)
     -n|--name : output filename prefix (default = FASTA prefix)
     -o|--outdir : output directory for results (default = PWD)
     -l|--logdir : output directory for logs (default = --outdir)
@@ -53,6 +54,10 @@ while [[ $# -gt 1 ]]; do
             ;;
         --size)
             size="-size ${2}"
+            shift
+            ;;
+        --mknown)
+            mknown=$2
             shift
             ;;
         -o|--outdir)
@@ -117,10 +122,14 @@ if [[ -n ${background:-} ]]; then
     bg_cp="cp $workdir/$background ."
     bg_arg="-bg $(basename $background)"
 fi
+if [[ -n ${mknown:-} ]]; then
+    mknown_cp="cp $workdir/$mknown ."
+    mknown_arg="-mknown $(basename $mknown)"
+fi
 
 # set command
 homer_cmd=("findMotifsGenome.pl $(basename ${bed}) ${genome}"
-           "homer_output ${size} -preparsedDir tmp")
+           "homer_output ${size} ${bg_arg:-} ${mknown_arg:-}")
 
 # set log filenames
 scr_name=${scr_name%.*}
@@ -145,6 +154,7 @@ script=$(cat <<- EOS
 
 		cp $workdir/$bed . &>> $out_log
 		${bg_cp:-} &>> $out_log
+		${mknown_cp:-} &>> $out_log
 
 		${homer_cmd[@]} &>> $out_log
 
@@ -152,8 +162,8 @@ script=$(cat <<- EOS
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
 		ls -lhAR &>> $out_log
-        ls -lhAR 
-        cp $out_log $workdir/$logdir/
+		ls -lhAR 
+		cp $out_log $workdir/$logdir/
 
 	EOS
 )

@@ -202,7 +202,7 @@ bamcov_command=("bamCoverage ${ext_arg:-} ${center_arg:-} ${smooth_arg:-} --binS
 script=$(cat <<- EOS 
 		#!/bin/bash
 		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=8gb:ncpus=12
+		#PBS -l select=1:mem=18gb:ncpus=12
 		#PBS -j oe
 		#PBS -N $name.track
 		#PBS -q med-bio

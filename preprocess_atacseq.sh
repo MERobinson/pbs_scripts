@@ -137,11 +137,11 @@ else
 fi
 
 # set commands
-chrfilt_cmd=("samtools view -q 10 -o ${name}.chrfilt.bam $(basename ${input}) ${chr_array[@]}")
+chrfilt_cmd=("samtools view -q 10 -o ${name}.chrfilt.bam ${name}.sort.bam ${chr_array[@]}")
 blfilt_cmd=("bedtools intersect -v -a ${name}.chrfilt.bam"
             "-b $(basename ${blacklist}) > ${name}.blfilt.bam")
 filt_cmd=("samtools view -F 1548 -u ${name}.blfilt.bam |"
-           "samtools sort -n -o ${name}.dedup.bam -")
+           "samtools sort -@ 8 -n -o ${name}.dedup.bam -")
 fixmate_cmd=("samtools fixmate -r ${name}.dedup.bam ${name}.fix.bam")
 bedpe_cmd=("bedtools bamtobed -bedpe -mate1 -i ${name}.fix.bam | gzip -nc > ${name}.bedpe.gz")
 shift_cmd=("zcat -f ${name}.bedpe.gz |"
@@ -191,6 +191,10 @@ script=$(cat <<- EOS
 		# copy files to scratch
 		cp -L ${workdir}/${input%.*}* .
 		cp -L ${workdir}/${blacklist} .
+
+		# make sure sorted and indexed
+		samtools sort -o ${name}.sort.bam $(basename ${input})
+		samtools index ${name}.sort.bam
 
 		# filter
 		echo "Filtering BAM"

@@ -28,6 +28,7 @@ optional arguments:
     --twopass : whether to run in 2pass mode [on|off] (default = 'off')
     --sjdb : comma sep list of SJ.out.tab files to pass to STARs
              --sjdbFileChrStartEnd argument (default = NULL)
+    --clip3 : n of bases to clip from 3' end (default = NULL)
     --check : whether to check input files [on|off] (default = 'on')
     --depend : list of PBS dependencies [string] (default = NULL)
 additional info:
@@ -75,6 +76,10 @@ while [[ $# -gt 1 ]]; do
             ;;
         --sjdb)
             sjdb=$2
+            shift
+            ;;
+        --clip3)
+            clip3=$2
             shift
             ;;
         --check)
@@ -174,6 +179,9 @@ if [[ -n ${sjdb:-} ]]; then
     sjdb_arg="--sjdbFileChrStartEnd ${sjdb_array[@]##*/}"
     sjdb_cp=$(printf "cp $workdir/%s .;" ${sjdb_array[@]})
 fi
+if [[ -n ${clip3:-} ]]; then
+    clip3_arg="--clip3pNbases ${clip3}"
+fi
 
 # get basenames/prefix
 fq1_base=$(basename "$fq1")
@@ -206,7 +214,8 @@ star_command=("STAR --runMode alignReads"
                 "${compress_arg:-}"
                 "${chimeric_arg:-}"
                 "${twopass_arg:-}"
-                "${sjdb_arg:-}")
+                "${sjdb_arg:-}"
+                "${clip3_arg:-}")
 
 # set log file names
 scr_name=$(basename "$0" .sh)
